@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { ATRIUM_CONFIG, type AtriumViewMode } from "./config";
 import { GeometryKit, bucketToGeometry, type LineKind } from "./geometry/solid";
 import { createAtriumMaterials } from "./materials";
@@ -69,13 +70,21 @@ export function createAtriumScene({
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.toneMappingExposure = 1.02;
+  renderer.toneMappingExposure = 0.96;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.shadowMap.autoUpdate = false;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(visualStyle.background);
+
+  // Procedural studio environment (zero external textures) for realistic subtle glass reflections & soft white bounce
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+  const studioEnvScene = new RoomEnvironment();
+  const envRenderTarget = pmremGenerator.fromScene(studioEnvScene, 0.04);
+  scene.environment = envRenderTarget.texture;
+  studioEnvScene.dispose();
+  pmremGenerator.dispose();
 
   const camera = new THREE.PerspectiveCamera(navigation.orbit.defaultFov, 16 / 9, 0.08, 220);
   camera.rotation.order = "YXZ";
@@ -87,6 +96,7 @@ export function createAtriumScene({
   const groundMat = new THREE.MeshBasicMaterial({
     name: "exterior-ground",
     color: new THREE.Color(visualStyle.exteriorGround),
+    depthWrite: true,
     toneMapped: false,
   });
   const groundPlane = new THREE.Mesh(groundGeo, groundMat);
@@ -192,31 +202,35 @@ export function createAtriumScene({
   sun.target.position.set(...lighting.sunTarget);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -12;
-  sun.shadow.camera.right = 12;
+  sun.shadow.camera.left = -13;
+  sun.shadow.camera.right = 13;
   sun.shadow.camera.top = 12;
   sun.shadow.camera.bottom = -12;
   sun.shadow.camera.near = 2;
-  sun.shadow.camera.far = 42;
-  sun.shadow.bias = -0.00035;
-  sun.shadow.normalBias = 0.02;
-  sun.shadow.radius = 2.4;
+  sun.shadow.camera.far = 45;
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 0.025;
+  sun.shadow.radius = 2.8;
   scene.add(sun, sun.target);
 
-  // Balanced front-right neutral fill so foreground doors & columns read with crisp clay volume
-  const fill = new THREE.DirectionalLight(0xffffff, 0.42);
-  fill.position.set(8.5, 6.2, 9.5);
+  // Soft balanced architectural fill lights so matte white surfaces show clean planar separation without clipping
+  const fill = new THREE.DirectionalLight(0xffffff, 0.32);
+  fill.position.set(9.0, 7.5, 10.5);
   scene.add(fill);
 
-  // Gentle interior alcove bounce lights under left & right mezzanines
+  const backBounce = new THREE.DirectionalLight(0xf6f7f9, 0.16);
+  backBounce.position.set(-4.0, 4.5, -12.0);
+  scene.add(backBounce);
+
+  // Broad, gentle interior alcove fill lights placed clear of soffits & walls (zero glare blobs)
   const alcoveLights: Array<[number, number, number, number, number]> = [
-    [-3.7, 2.85, -5.5, 0.9, 9],
-    [-3.8, 2.85, -11.4, 1.05, 8],
-    [2.9, 2.85, -6.8, 0.95, 8],
-    [4.1, 5.9, -6.8, 0.75, 10],
+    [-2.8, 2.25, -5.8, 0.24, 11],
+    [-3.6, 2.15, -11.4, 0.28, 9],
+    [1.8, 2.15, -6.6, 0.24, 10],
+    [3.4, 5.1, -6.6, 0.24, 12],
   ];
   for (const [lx, ly, lz, inten, dist] of alcoveLights) {
-    const pl = new THREE.PointLight(0xffffff, inten, dist, 1.6);
+    const pl = new THREE.PointLight(0xffffff, inten, dist, 1.0);
     pl.position.set(lx, ly, lz);
     scene.add(pl);
   }
@@ -311,12 +325,12 @@ export function createAtriumScene({
   const resizeObserver = new ResizeObserver(() => resize());
   resizeObserver.observe(host);
 
-  // Pre-compile shaders & bake initial soft shadow map
+  // Bake initial soft shadow map before first frame
   arch.doors.setOpenProgress(reducedMotion ? 1 : 0);
+  renderer.shadowMap.needsUpdate = true;
   resize();
   setMode(initialMode);
   renderer.shadowMap.needsUpdate = true;
-  renderer.compile(scene, camera);
   renderFrame();
 
   function animateDoorsOpen(durationMs = 820): void {
@@ -352,10 +366,10 @@ export function createAtriumScene({
       // Smooth cubic ease-out for architectural portal leaves
       const eased = 1 - Math.pow(1 - raw, 3);
       arch.doors.setOpenProgress(eased);
-      renderer.shadowMap.needsUpdate = true;
       needsRender = true;
       if (raw >= 1) {
         doorAnimActive = false;
+        renderer.shadowMap.needsUpdate = true;
       }
     }
 
@@ -461,6 +475,7 @@ export function createAtriumScene({
       arch.doors.dispose();
       for (const g of disposableGeometries) g.dispose();
       groundMat.dispose();
+      envRenderTarget.dispose();
       materials.dispose();
       scene.clear();
       renderer.dispose();

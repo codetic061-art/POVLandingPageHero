@@ -22,23 +22,35 @@ varying vec3 vAtriumWn;
 
 float atriumAO(vec3 p, vec3 nn) {
   float occ = 0.0;
-  float r = 0.85;
-  // Ground floor & upper mezzanine floor contact darkening
-  occ += (1.0 - abs(nn.y)) * exp(-max(p.y, 0.0) / r) * 0.65;
-  if (p.y > 3.43 && (p.x < -2.80 || p.x > 2.30)) {
-    occ += (1.0 - abs(nn.y)) * exp(-max(p.y - 3.48, 0.0) / r) * 0.55;
-  }
-  // Mezzanine soffit & main ceiling corner occlusion
-  if (p.y < 3.20 && (p.x < -2.80 || p.x > 2.30) && p.z < -0.05) {
-    occ += (1.0 - max(0.0, nn.y)) * exp(-max(3.18 - p.y, 0.0) / 0.72) * 0.58;
-  }
-  occ += (1.0 - max(0.0, nn.y)) * exp(-max(6.60 - p.y, 0.0) / 0.95) * 0.45;
+  float r = 0.78;
+  // Smooth interior bounding mask so exterior facades stay bright and clean
+  float insideZ = smoothstep(0.18, -0.15, p.z) * smoothstep(-13.45, -13.10, p.z);
+  float insideX = smoothstep(5.05, 4.78, abs(p.x));
+  float interiorMask = insideZ * insideX;
+
+  // Ground floor contact occlusion (only above Y = 0)
+  float aboveGround = smoothstep(-0.08, 0.02, p.y);
+  occ += aboveGround * (1.0 - abs(nn.y)) * exp(-max(p.y, 0.0) / r) * 0.52;
+
+  // Smooth upper mezzanine floor contact darkening (no hard Y step seams)
+  float wingMask = smoothstep(-2.62, -2.92, p.x) + smoothstep(2.12, 2.42, p.x);
+  wingMask = clamp(wingMask, 0.0, 1.0) * interiorMask;
+  float aboveMezz = smoothstep(3.40, 3.52, p.y);
+  occ += wingMask * aboveMezz * (1.0 - abs(nn.y)) * exp(-max(p.y - 3.48, 0.0) / r) * 0.42;
+
+  // Smooth mezzanine soffit under-corner occlusion
+  float belowSoffit = smoothstep(3.26, 3.12, p.y) * smoothstep(2.10, 2.75, p.y);
+  occ += wingMask * belowSoffit * (1.0 - max(0.0, nn.y)) * exp(-max(3.18 - p.y, 0.0) / 0.65) * 0.40;
+
+  // Main atrium ceiling corner occlusion
+  float nearCeil = smoothstep(5.30, 6.25, p.y);
+  occ += interiorMask * nearCeil * (1.0 - max(0.0, nn.y)) * exp(-max(6.60 - p.y, 0.0) / 0.90) * 0.38;
+
   // Perimeter wall corner occlusion inside the atrium
-  if (p.z < 0.05 && p.z > -13.25 && abs(p.x) < 4.90) {
-    occ += (1.0 - abs(nn.x)) * (exp(-max(p.x + 4.85, 0.0) / r) + exp(-max(4.85 - p.x, 0.0) / r)) * 0.42;
-    occ += (1.0 - abs(nn.z)) * exp(-max(p.z + 13.20, 0.0) / 0.95) * 0.48;
-  }
-  return clamp(1.0 - 0.22 * occ, 0.70, 1.0);
+  occ += interiorMask * (1.0 - abs(nn.x)) * (exp(-max(p.x + 4.85, 0.0) / r) + exp(-max(4.85 - p.x, 0.0) / r)) * 0.30;
+  occ += interiorMask * (1.0 - abs(nn.z)) * exp(-max(p.z + 13.20, 0.0) / 0.90) * 0.34;
+
+  return clamp(1.0 - 0.21 * occ, 0.77, 1.0);
 }
 `;
 
@@ -48,8 +60,8 @@ function attachAnalyticalAO(
   strength = 1,
 ): THREE.MeshStandardMaterial {
   material.polygonOffset = true;
-  material.polygonOffsetFactor = 1;
-  material.polygonOffsetUnits = 1;
+  material.polygonOffsetFactor = 0.85;
+  material.polygonOffsetUnits = 0.85;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uAoStrength = { value: strength };
     shader.vertexShader = shader.vertexShader
@@ -70,7 +82,7 @@ function attachAnalyticalAO(
           vec3 nnA = normalize(vAtriumWn) * (gl_FrontFacing ? 1.0 : -1.0);
           float aoFactor = mix(1.0, atriumAO(vAtriumWp, nnA), uAoStrength);
           reflectedLight.indirectDiffuse *= aoFactor;
-          reflectedLight.directDiffuse *= mix(1.0, aoFactor, 0.35);
+          reflectedLight.directDiffuse *= mix(1.0, aoFactor, 0.34);
         }`,
       );
   };
@@ -81,9 +93,9 @@ function attachAnalyticalAO(
 /**
  * Strict 3-material architectural concept model palette:
  *   1. Solid matte white clay for all architecture and furniture
- *   2. Subtle natural botanical green for plants only
- *   3. Clear, lightly transparent physical glass for windows, railings, and partitions
- * Plus thin dark graphite screen-space outlines and soft neutral contact shadows.
+ *   2. Natural soft botanical green for plants only
+ *   3. Subtle, clear, slightly tinted physical glass with realistic studio reflections
+ * Plus delicate graphite screen-space outlines and soft neutral contact shadows.
  */
 export function createAtriumMaterials(): AtriumMaterials {
   const { visualStyle } = ATRIUM_CONFIG;
@@ -91,40 +103,47 @@ export function createAtriumMaterials(): AtriumMaterials {
   const lineMaterials: LineMaterial[] = [];
   const resolution = new THREE.Vector2(1440, 900);
 
-  // 1. Solid matte white clay (no PBR maps, no roughness/normal textures)
+  // 1. Clean matte white architectural clay (zero textures, zero metallic sheen)
   const clay = attachAnalyticalAO(
     new THREE.MeshStandardMaterial({
       name: "clay-white",
       color: new THREE.Color(visualStyle.clayWhite),
-      roughness: 0.93,
+      roughness: 0.94,
       metalness: 0.0,
-      side: THREE.DoubleSide,
+      envMapIntensity: 0.11,
+      side: THREE.FrontSide,
     }),
-    "atrium-clay-ao",
+    "atrium-clay-ao-v3",
     1.0,
   );
   disposable.push(clay);
 
-  // 2. Subtle natural botanical green (used strictly for plant foliage)
+  // 2. Natural soft green strictly for botanical plant leaves
   const plant = attachAnalyticalAO(
     new THREE.MeshStandardMaterial({
       name: "plant-green",
       color: new THREE.Color(visualStyle.plantGreen),
-      roughness: 0.86,
+      roughness: 0.85,
       metalness: 0.0,
+      envMapIntensity: 0.14,
       side: THREE.DoubleSide,
     }),
-    "atrium-plant-ao",
-    0.85,
+    "atrium-plant-ao-v3",
+    0.55,
   );
   disposable.push(plant);
 
-  // 3. Clear, lightly transparent physical glass
+  // 3. Subtle, clear, slightly tinted architectural glass with realistic reflections
   const glass = new THREE.MeshPhysicalMaterial({
     name: "clear-glass",
     color: new THREE.Color(visualStyle.glassTint),
-    roughness: 0.07,
-    metalness: 0.02,
+    roughness: 0.05,
+    metalness: 0.0,
+    ior: 1.5,
+    reflectivity: 0.92,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.04,
+    envMapIntensity: 1.35,
     transmission: 0.0,
     transparent: true,
     opacity: visualStyle.glassOpacity,
@@ -133,12 +152,12 @@ export function createAtriumMaterials(): AtriumMaterials {
   });
   disposable.push(glass);
 
-  const lineSpec: Record<LineKind, { color: string; width: number }> = {
-    structure: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.structure },
-    furniture: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.furniture },
-    detail: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.detail },
-    floorGrid: { color: visualStyle.subtleGridInk, width: visualStyle.lineWidths.floorGrid },
-    glassGlint: { color: visualStyle.glassGlintInk, width: visualStyle.lineWidths.detail },
+  const lineSpec: Record<LineKind, { color: string; width: number; opacity: number }> = {
+    structure: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.structure, opacity: 0.92 },
+    furniture: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.furniture, opacity: 0.84 },
+    detail: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.detail, opacity: 0.68 },
+    floorGrid: { color: visualStyle.subtleGridInk, width: visualStyle.lineWidths.floorGrid, opacity: 0.72 },
+    glassGlint: { color: visualStyle.glassGlintInk, width: visualStyle.lineWidths.detail, opacity: 0.40 },
   };
 
   function createLines(kind: LineKind, positions: number[]): LineSegments2 | null {
@@ -150,6 +169,10 @@ export function createAtriumMaterials(): AtriumMaterials {
       color: new THREE.Color(spec.color).getHex(),
       linewidth: spec.width,
       worldUnits: false,
+      transparent: true,
+      opacity: spec.opacity,
+      depthTest: true,
+      depthWrite: false,
       toneMapped: false,
       resolution: resolution.clone(),
     });
@@ -162,14 +185,15 @@ export function createAtriumMaterials(): AtriumMaterials {
     return segments;
   }
 
-  function createContactShadow(strength = 0.16): THREE.ShaderMaterial {
+  function createContactShadow(strength = 0.14): THREE.ShaderMaterial {
     const mat = new THREE.ShaderMaterial({
       name: "contact-shadow",
       transparent: true,
+      depthTest: true,
       depthWrite: false,
       polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
+      polygonOffsetFactor: -0.6,
+      polygonOffsetUnits: -0.6,
       uniforms: {
         uStrength: { value: strength },
       },
@@ -186,7 +210,7 @@ export function createAtriumMaterials(): AtriumMaterials {
         void main() {
           vec2 e = smoothstep(vec2(0.0), vec2(0.48), vUv) * smoothstep(vec2(0.0), vec2(0.48), 1.0 - vUv);
           float alpha = pow(e.x * e.y, 1.45) * uStrength;
-          gl_FragColor = vec4(0.11, 0.12, 0.13, alpha);
+          gl_FragColor = vec4(0.14, 0.15, 0.17, alpha);
         }
       `,
     });

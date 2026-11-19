@@ -53,7 +53,16 @@ export class RectSolid {
     return this;
   }
 
-  build(): { geometry: THREE.BufferGeometry; edges: number[]; faceCount: number } {
+  build(
+    edgeFilter?: (
+      x0: number,
+      y0: number,
+      z0: number,
+      x1: number,
+      y1: number,
+      z1: number,
+    ) => boolean,
+  ): { geometry: THREE.BufferGeometry; edges: number[]; faceCount: number } {
     const uniq = (arr: number[]) => [...new Set(arr)].sort((a, b) => a - b);
     const xs = uniq(this.ops.flatMap((o) => [o[1], o[4]]));
     const ys = uniq(this.ops.flatMap((o) => [o[2], o[5]]));
@@ -182,7 +191,9 @@ export class RectSolid {
             if (runStart < 0) return;
             const p0 = point(ca[runStart], cb[b], cc[c]);
             const p1 = point(ca[endA], cb[b], cc[c]);
-            edges.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]);
+            if (!edgeFilter || edgeFilter(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2])) {
+              edges.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]);
+            }
             runStart = -1;
           };
           for (let a = 0; a < na; a++) {
@@ -532,6 +543,29 @@ export class GeometryKit {
     }
   }
 
+  solid(
+    mat: MaterialKind,
+    solid: RectSolid,
+    lineKind: LineKind | null = "structure",
+    edgeFilter?: (
+      x0: number,
+      y0: number,
+      z0: number,
+      x1: number,
+      y1: number,
+      z1: number,
+    ) => boolean,
+  ): void {
+    const built = solid.build(edgeFilter);
+    this.geo(mat, built.geometry, null, 32, true);
+    if (lineKind !== null && built.edges.length >= 6) {
+      const E = this.lines[lineKind];
+      for (let i = 0; i < built.edges.length; i++) {
+        E.push(built.edges[i]);
+      }
+    }
+  }
+
   segment(
     lineKind: LineKind,
     x0: number,
@@ -550,7 +584,7 @@ export class GeometryKit {
     cz: number,
     width: number,
     depth: number,
-    strength = 0.17,
+    strength = 0.14,
   ): void {
     this.contactFootprints.push({ cx, y, cz, width, depth, strength });
   }
