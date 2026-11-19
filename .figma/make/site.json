@@ -1,0 +1,10 @@
+{
+  "description": "A minimalist virtual office landing page showcasing POV’s collaborative workspace and helping teams explore the space and get started.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

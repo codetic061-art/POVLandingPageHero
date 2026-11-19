@@ -1,0 +1,221 @@
+import { ATRIUM_CONFIG } from "../config";
+
+export interface Collider3D {
+  tag: string;
+  x0: number;
+  x1: number;
+  z0: number;
+  z1: number;
+  y0: number;
+  y1: number;
+}
+
+export interface WalkSurface {
+  id: string;
+  x0: number;
+  x1: number;
+  z0: number;
+  z1: number;
+  heightAt: (x: number, z: number) => number;
+}
+
+export interface ResolvedStep {
+  x: number;
+  z: number;
+  feetY: number;
+  surfaceId: string;
+}
+
+/**
+ * Multi-elevation 3D collision & walkable-surface solver adapted from
+ * apartment-3d-plan/js/walk.js and extended for staircases and mezzanines.
+ */
+export class CollisionWorld {
+  private readonly staticColliders: Collider3D[] = [];
+  private dynamicColliders: Collider3D[] = [];
+  private readonly surfaces: WalkSurface[] = [];
+  private readonly maxStepDeltaY = ATRIUM_CONFIG.navigation.firstPerson.maxStepDeltaY;
+
+  addCollider(
+    tag: string,
+    ax0: number,
+    ay0: number,
+    az0: number,
+    ax1: number,
+    ay1: number,
+    az1: number,
+  ): void {
+    this.staticColliders.push({
+      tag,
+      x0: Math.min(ax0, ax1),
+      x1: Math.max(ax0, ax1),
+      y0: Math.min(ay0, ay1),
+      y1: Math.max(ay0, ay1),
+      z0: Math.min(az0, az1),
+      z1: Math.max(az0, az1),
+    });
+  }
+
+  setDynamicColliders(colliders: Collider3D[]): void {
+    this.dynamicColliders = colliders.map((c) => ({
+      tag: c.tag,
+      x0: Math.min(c.x0, c.x1),
+      x1: Math.max(c.x0, c.x1),
+      y0: Math.min(c.y0, c.y1),
+      y1: Math.max(c.y0, c.y1),
+      z0: Math.min(c.z0, c.z1),
+      z1: Math.max(c.z0, c.z1),
+    }));
+  }
+
+  addSurface(
+    id: string,
+    ax0: number,
+    az0: number,
+    ax1: number,
+    az1: number,
+    heightAt: (x: number, z: number) => number,
+  ): void {
+    this.surfaces.push({
+      id,
+      x0: Math.min(ax0, ax1),
+      x1: Math.max(ax0, ax1),
+      z0: Math.min(az0, az1),
+      z1: Math.max(az0, az1),
+      heightAt,
+    });
+  }
+
+  getColliderCount(): number {
+    return this.staticColliders.length + this.dynamicColliders.length;
+  }
+
+  getSurfaceCount(): number {
+    return this.surfaces.length;
+  }
+
+  /**
+   * Finds the walkable surface at (x, z) closest to refFeetY within step tolerance.
+   */
+  findSurface(
+    x: number,
+    z: number,
+    refFeetY: number,
+    allowAnyElevation = false,
+  ): { feetY: number; id: string } | null {
+    let best: { feetY: number; id: string; diff: number } | null = null;
+    for (const s of this.surfaces) {
+      if (x < s.x0 || x > s.x1 || z < s.z0 || z > s.z1) continue;
+      const y = s.heightAt(x, z);
+      const diff = Math.abs(y - refFeetY);
+      if (!allowAnyElevation && diff > this.maxStepDeltaY) continue;
+      if (!best || diff < best.diff || (Math.abs(diff - best.diff) < 0.02 && y > best.feetY)) {
+        best = { feetY: y, id: s.id, diff };
+      }
+    }
+    return best ? { feetY: best.feetY, id: best.id } : null;
+  }
+
+  private pushOut(x: number, z: number, feetY: number, r: number): [number, number] {
+    let px = x;
+    let pz = z;
+    const bodyBottom = feetY + 0.24;
+    const bodyTop = feetY + 1.72;
+    const all =
+      this.dynamicColliders.length > 0
+        ? [...this.staticColliders, ...this.dynamicColliders]
+        : this.staticColliders;
+
+    for (let iter = 0; iter < 3; iter++) {
+      for (const b of all) {
+        if (b.y1 <= bodyBottom || b.y0 >= bodyTop) continue;
+        const cx = Math.max(b.x0, Math.min(px, b.x1));
+        const cz = Math.max(b.z0, Math.min(pz, b.z1));
+        const dx = px - cx;
+        const dz = pz - cz;
+        const distSq = dx * dx + dz * dz;
+        if (distSq < r * r) {
+          if (distSq > 1e-8) {
+            const dist = Math.sqrt(distSq);
+            const push = r - dist;
+            px += (dx / dist) * push;
+            pz += (dz / dist) * push;
+          } else {
+            const dL = px - b.x0;
+            const dR = b.x1 - px;
+            const dT = pz - b.z0;
+            const dB = b.z1 - pz;
+            const m = Math.min(dL, dR, dT, dB);
+            if (m === dL) px = b.x0 - r;
+            else if (m === dR) px = b.x1 + r;
+            else if (m === dT) pz = b.z0 - r;
+            else pz = b.z1 + r;
+          }
+        }
+      }
+    }
+    return [px, pz];
+  }
+
+  private isCircleClear(x: number, z: number, feetY: number, r: number): boolean {
+    const bodyBottom = feetY + 0.24;
+    const bodyTop = feetY + 1.72;
+    const all =
+      this.dynamicColliders.length > 0
+        ? [...this.staticColliders, ...this.dynamicColliders]
+        : this.staticColliders;
+    const tolSq = (r - 1e-3) * (r - 1e-3);
+    for (const b of all) {
+      if (b.y1 <= bodyBottom || b.y0 >= bodyTop) continue;
+      const cx = Math.max(b.x0, Math.min(x, b.x1));
+      const cz = Math.max(b.z0, Math.min(z, b.z1));
+      const dx = x - cx;
+      const dz = z - cz;
+      if (dx * dx + dz * dz < tolSq) return false;
+    }
+    return true;
+  }
+
+  resolveMove(
+    prevX: number,
+    prevZ: number,
+    prevFeetY: number,
+    targetX: number,
+    targetZ: number,
+    radius = ATRIUM_CONFIG.navigation.firstPerson.playerRadius,
+  ): ResolvedStep {
+    const dist = Math.hypot(targetX - prevX, targetZ - prevZ);
+    const steps = Math.max(1, Math.ceil(dist / 0.04));
+    let cx = prevX;
+    let cz = prevZ;
+    let cy = prevFeetY;
+    let surfaceId = this.findSurface(cx, cz, cy, true)?.id ?? "ground-atrium";
+
+    const stepX = (targetX - prevX) / steps;
+    const stepZ = (targetZ - prevZ) / steps;
+
+    for (let i = 0; i < steps; i++) {
+      // X sub-step
+      const [nxX, nzX] = this.pushOut(cx + stepX, cz, cy, radius);
+      const surfX = this.findSurface(nxX, nzX, cy);
+      if (surfX && this.isCircleClear(nxX, nzX, surfX.feetY, radius)) {
+        cx = nxX;
+        cz = nzX;
+        cy = surfX.feetY;
+        surfaceId = surfX.id;
+      }
+
+      // Z sub-step
+      const [nxZ, nzZ] = this.pushOut(cx, cz + stepZ, cy, radius);
+      const surfZ = this.findSurface(nxZ, nzZ, cy);
+      if (surfZ && this.isCircleClear(nxZ, nzZ, surfZ.feetY, radius)) {
+        cx = nxZ;
+        cz = nzZ;
+        cy = surfZ.feetY;
+        surfaceId = surfZ.id;
+      }
+    }
+
+    return { x: cx, z: cz, feetY: cy, surfaceId };
+  }
+}
