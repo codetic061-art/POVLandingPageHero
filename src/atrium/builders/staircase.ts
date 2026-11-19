@@ -67,7 +67,7 @@ export function buildStaircase(kit: GeometryKit, collisionWorld: CollisionWorld)
       yTop - treadH,
       (lf.z0 + lf.z1) / 2,
     );
-    kit.geo("clay", tread, "furniture", 36);
+    kit.geo("floor", tread, "furniture", 36);
   }
   kit.contactShadow(
     lf.xStart - 0.05,
@@ -120,7 +120,7 @@ export function buildStaircase(kit: GeometryKit, collisionWorld: CollisionWorld)
       yTop - treadT,
       (sz0 + sz1) / 2 + nosing / 2,
     );
-    kit.geo("clay", tread, "furniture", 36);
+    kit.geo("floor", tread, "furniture", 36);
   }
 
   // ---- 3. Dimensional Sloped Wall Handrail + Inner Handrail + Upper Stairwell Balustrade ----

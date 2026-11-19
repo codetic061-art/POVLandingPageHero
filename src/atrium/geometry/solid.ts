@@ -9,7 +9,19 @@ export interface GeometryBucket {
   idx: number[];
 }
 
-export type MaterialKind = "clay" | "plant" | "glass";
+export type MaterialKind =
+  | "clay"
+  | "floor"
+  | "chair"
+  | "chairBase"
+  | "sofa"
+  | "desk"
+  | "tech"
+  | "accentBlue"
+  | "accentBeige"
+  | "accentGold"
+  | "plant"
+  | "glass";
 export type LineKind = "structure" | "furniture" | "detail" | "floorGrid" | "glassGlint";
 
 export interface PrototypeData {
@@ -62,7 +74,13 @@ export class RectSolid {
       y1: number,
       z1: number,
     ) => boolean,
-  ): { geometry: THREE.BufferGeometry; edges: number[]; faceCount: number } {
+    floorElevations?: readonly number[],
+  ): {
+    geometry: THREE.BufferGeometry;
+    floorGeometry: THREE.BufferGeometry;
+    edges: number[];
+    faceCount: number;
+  } {
     const uniq = (arr: number[]) => [...new Set(arr)].sort((a, b) => a - b);
     const xs = uniq(this.ops.flatMap((o) => [o[1], o[4]]));
     const ys = uniq(this.ops.flatMap((o) => [o[2], o[5]]));
@@ -96,22 +114,27 @@ export class RectSolid {
       i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz ? 0 : occ[id(i, j, k)];
 
     const bucket: GeometryBucket = { p: [], n: [], uv: [], idx: [] };
+    const floorBucket: GeometryBucket = { p: [], n: [], uv: [], idx: [] };
+    const isFloorY = (y: number) =>
+      Boolean(floorElevations && floorElevations.some((fy) => Math.abs(y - fy) < 0.005));
+
     const quad = (
+      target: GeometryBucket,
       a: [number, number, number],
       b: [number, number, number],
       c: [number, number, number],
       d: [number, number, number],
       nrm: [number, number, number],
     ) => {
-      const base = bucket.p.length / 3;
+      const base = target.p.length / 3;
       for (const v of [a, b, c, d]) {
-        bucket.p.push(v[0], v[1], v[2]);
-        bucket.n.push(nrm[0], nrm[1], nrm[2]);
-        if (nrm[0] !== 0) bucket.uv.push(v[2], v[1]);
-        else if (nrm[1] !== 0) bucket.uv.push(v[0], v[2]);
-        else bucket.uv.push(v[0], v[1]);
+        target.p.push(v[0], v[1], v[2]);
+        target.n.push(nrm[0], nrm[1], nrm[2]);
+        if (nrm[0] !== 0) target.uv.push(v[2], v[1]);
+        else if (nrm[1] !== 0) target.uv.push(v[0], v[2]);
+        else target.uv.push(v[0], v[1]);
       }
-      bucket.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      target.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
     };
 
     let faceCount = 0;
@@ -126,27 +149,28 @@ export class RectSolid {
           const z0 = zs[k];
           const z1 = zs[k + 1];
           if (!at(i + 1, j, k)) {
-            quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0]);
+            quad(bucket, [x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0]);
             faceCount++;
           }
           if (!at(i - 1, j, k)) {
-            quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0]);
+            quad(bucket, [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0]);
             faceCount++;
           }
           if (!at(i, j + 1, k)) {
-            quad([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0]);
+            const target = isFloorY(y1) ? floorBucket : bucket;
+            quad(target, [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0]);
             faceCount++;
           }
           if (!at(i, j - 1, k)) {
-            quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0]);
+            quad(bucket, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0]);
             faceCount++;
           }
           if (!at(i, j, k + 1)) {
-            quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1]);
+            quad(bucket, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1]);
             faceCount++;
           }
           if (!at(i, j, k - 1)) {
-            quad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1]);
+            quad(bucket, [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1]);
             faceCount++;
           }
         }
@@ -221,6 +245,7 @@ export class RectSolid {
 
     return {
       geometry: bucketToGeometry(bucket),
+      floorGeometry: bucketToGeometry(floorBucket),
       edges,
       faceCount,
     };
@@ -423,6 +448,15 @@ export function bakePrototype(
 export class GeometryKit {
   readonly buckets: Record<MaterialKind, GeometryBucket> = {
     clay: { p: [], n: [], uv: [], idx: [] },
+    floor: { p: [], n: [], uv: [], idx: [] },
+    chair: { p: [], n: [], uv: [], idx: [] },
+    chairBase: { p: [], n: [], uv: [], idx: [] },
+    sofa: { p: [], n: [], uv: [], idx: [] },
+    desk: { p: [], n: [], uv: [], idx: [] },
+    tech: { p: [], n: [], uv: [], idx: [] },
+    accentBlue: { p: [], n: [], uv: [], idx: [] },
+    accentBeige: { p: [], n: [], uv: [], idx: [] },
+    accentGold: { p: [], n: [], uv: [], idx: [] },
     plant: { p: [], n: [], uv: [], idx: [] },
     glass: { p: [], n: [], uv: [], idx: [] },
   };

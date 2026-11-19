@@ -3,12 +3,22 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { ATRIUM_CONFIG } from "./config";
-import type { LineKind } from "./geometry/solid";
+import type { LineKind, MaterialKind } from "./geometry/solid";
 
 export interface AtriumMaterials {
   clay: THREE.MeshStandardMaterial;
+  floor: THREE.MeshStandardMaterial;
+  chair: THREE.MeshStandardMaterial;
+  chairBase: THREE.MeshStandardMaterial;
+  sofa: THREE.MeshStandardMaterial;
+  desk: THREE.MeshStandardMaterial;
+  tech: THREE.MeshStandardMaterial;
+  accentBlue: THREE.MeshStandardMaterial;
+  accentBeige: THREE.MeshStandardMaterial;
+  accentGold: THREE.MeshStandardMaterial;
   plant: THREE.MeshStandardMaterial;
   glass: THREE.MeshPhysicalMaterial;
+  byKind: Record<MaterialKind, THREE.Material>;
   lineMaterials: LineMaterial[];
   createLines: (kind: LineKind, positions: number[]) => LineSegments2 | null;
   createContactShadow: (strength?: number) => THREE.ShaderMaterial;
@@ -91,11 +101,13 @@ function attachAnalyticalAO(
 }
 
 /**
- * Strict 3-material architectural concept model palette:
- *   1. Solid matte white clay for all architecture and furniture
- *   2. Natural soft botanical green for plants only
- *   3. Subtle, clear, slightly tinted physical glass with realistic studio reflections
- * Plus delicate graphite screen-space outlines and soft neutral contact shadows.
+ * Refined minimal architectural concept palette:
+ *   - Dominant matte white walls & structural shell
+ *   - Very light warm-gray floors for subtle ground separation
+ *   - Muted slate-blue & charcoal chairs + dusty blue lounge/loveseat upholstery
+ *   - Light neutral desks/credenzas, graphite tech, restrained blue/beige/champagne-gold accents
+ *   - Natural soft botanical green foliage
+ *   - Subtle cool-blue tinted physical glass with studio reflections
  */
 export function createAtriumMaterials(): AtriumMaterials {
   const { visualStyle } = ATRIUM_CONFIG;
@@ -103,37 +115,64 @@ export function createAtriumMaterials(): AtriumMaterials {
   const lineMaterials: LineMaterial[] = [];
   const resolution = new THREE.Vector2(1440, 900);
 
-  // 1. Clean matte white architectural clay (zero textures, zero metallic sheen)
-  const clay = attachAnalyticalAO(
-    new THREE.MeshStandardMaterial({
-      name: "clay-white",
-      color: new THREE.Color(visualStyle.clayWhite),
-      roughness: 0.94,
-      metalness: 0.0,
-      envMapIntensity: 0.11,
-      side: THREE.FrontSide,
-    }),
-    "atrium-clay-ao-v3",
-    1.0,
-  );
-  disposable.push(clay);
+  const makeMatte = (
+    name: string,
+    colorHex: string,
+    roughness: number,
+    envMapIntensity: number,
+    aoStrength: number,
+    side: THREE.Side = THREE.FrontSide,
+    emissiveHex?: string,
+    emissiveIntensity = 0,
+  ) => {
+    const mat = attachAnalyticalAO(
+      new THREE.MeshStandardMaterial({
+        name,
+        color: new THREE.Color(colorHex),
+        roughness,
+        metalness: 0.0,
+        envMapIntensity,
+        side,
+        ...(emissiveHex
+          ? { emissive: new THREE.Color(emissiveHex), emissiveIntensity }
+          : {}),
+      }),
+      `atrium-${name}-ao-v4`,
+      aoStrength,
+    );
+    disposable.push(mat);
+    return mat;
+  };
 
-  // 2. Natural soft green strictly for botanical plant leaves
-  const plant = attachAnalyticalAO(
-    new THREE.MeshStandardMaterial({
-      name: "plant-green",
-      color: new THREE.Color(visualStyle.plantGreen),
-      roughness: 0.85,
-      metalness: 0.0,
-      envMapIntensity: 0.14,
-      side: THREE.DoubleSide,
-    }),
-    "atrium-plant-ao-v3",
+  const clay = makeMatte("clay-white", visualStyle.clayWhite, 0.94, 0.11, 1.0);
+  const floor = makeMatte("floor-warm-gray", visualStyle.floorWarmGray, 0.92, 0.12, 0.9);
+  const chair = makeMatte("chair-slate", visualStyle.chairSlate, 0.86, 0.16, 0.72);
+  const chairBase = makeMatte("chair-charcoal", visualStyle.chairCharcoal, 0.78, 0.18, 0.65);
+  const sofa = makeMatte("sofa-blue", visualStyle.sofaBlue, 0.9, 0.14, 0.75);
+  const desk = makeMatte("desk-neutral", visualStyle.deskNeutral, 0.91, 0.12, 0.85);
+  const tech = makeMatte("tech-graphite", visualStyle.techGraphite, 0.72, 0.22, 0.55);
+  const accentBlue = makeMatte("accent-blue", visualStyle.accentBlue, 0.78, 0.18, 0.5);
+  const accentBeige = makeMatte("accent-beige", visualStyle.accentBeige, 0.9, 0.12, 0.7);
+  const accentGold = makeMatte(
+    "accent-gold",
+    visualStyle.accentGold,
+    0.72,
+    0.26,
+    0.45,
+    THREE.FrontSide,
+    "#f2d294",
+    0.12,
+  );
+  const plant = makeMatte(
+    "plant-green",
+    visualStyle.plantGreen,
+    0.85,
+    0.14,
     0.55,
+    THREE.DoubleSide,
   );
-  disposable.push(plant);
 
-  // 3. Subtle, clear, slightly tinted architectural glass with realistic reflections
+  // Subtle cool-blue tinted physical glass with realistic reflections
   const glass = new THREE.MeshPhysicalMaterial({
     name: "clear-glass",
     color: new THREE.Color(visualStyle.glassTint),
@@ -143,7 +182,7 @@ export function createAtriumMaterials(): AtriumMaterials {
     reflectivity: 0.92,
     clearcoat: 1.0,
     clearcoatRoughness: 0.04,
-    envMapIntensity: 1.35,
+    envMapIntensity: 1.38,
     transmission: 0.0,
     transparent: true,
     opacity: visualStyle.glassOpacity,
@@ -152,11 +191,26 @@ export function createAtriumMaterials(): AtriumMaterials {
   });
   disposable.push(glass);
 
+  const byKind: Record<MaterialKind, THREE.Material> = {
+    clay,
+    floor,
+    chair,
+    chairBase,
+    sofa,
+    desk,
+    tech,
+    accentBlue,
+    accentBeige,
+    accentGold,
+    plant,
+    glass,
+  };
+
   const lineSpec: Record<LineKind, { color: string; width: number; opacity: number }> = {
-    structure: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.structure, opacity: 0.92 },
-    furniture: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.furniture, opacity: 0.84 },
-    detail: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.detail, opacity: 0.68 },
-    floorGrid: { color: visualStyle.subtleGridInk, width: visualStyle.lineWidths.floorGrid, opacity: 0.72 },
+    structure: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.structure, opacity: 0.90 },
+    furniture: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.furniture, opacity: 0.82 },
+    detail: { color: visualStyle.outlineInk, width: visualStyle.lineWidths.detail, opacity: 0.66 },
+    floorGrid: { color: visualStyle.subtleGridInk, width: visualStyle.lineWidths.floorGrid, opacity: 0.70 },
     glassGlint: { color: visualStyle.glassGlintInk, width: visualStyle.lineWidths.detail, opacity: 0.40 },
   };
 
@@ -220,8 +274,18 @@ export function createAtriumMaterials(): AtriumMaterials {
 
   return {
     clay,
+    floor,
+    chair,
+    chairBase,
+    sofa,
+    desk,
+    tech,
+    accentBlue,
+    accentBeige,
+    accentGold,
     plant,
     glass,
+    byKind,
     lineMaterials,
     createLines,
     createContactShadow,

@@ -2,16 +2,51 @@ import * as THREE from "three";
 import { ATRIUM_CONFIG } from "../config";
 import type { CollisionWorld } from "./collisionWorld";
 
-const MOVE_CODES = new Set([
-  "KeyW",
-  "KeyA",
-  "KeyS",
-  "KeyD",
-  "ArrowUp",
-  "ArrowDown",
-  "ArrowLeft",
-  "ArrowRight",
-]);
+type MoveDir = "fwd" | "back" | "left" | "right";
+
+function mapEventToMoveDir(e: KeyboardEvent): MoveDir | null {
+  switch (e.code) {
+    case "KeyW":
+    case "ArrowUp":
+      return "fwd";
+    case "KeyS":
+    case "ArrowDown":
+      return "back";
+    case "KeyA":
+    case "ArrowLeft":
+      return "left";
+    case "KeyD":
+    case "ArrowRight":
+      return "right";
+    default:
+      break;
+  }
+  switch (e.key.toLowerCase()) {
+    case "w":
+      return "fwd";
+    case "s":
+      return "back";
+    case "a":
+      return "left";
+    case "d":
+      return "right";
+    default:
+      return null;
+  }
+}
+
+function normalizeAngleDelta(from: number, to: number): number {
+  let delta = (to - from) % (Math.PI * 2);
+  if (delta > Math.PI) delta -= Math.PI * 2;
+  if (delta < -Math.PI) delta += Math.PI * 2;
+  return delta;
+}
+
+export interface CameraPose {
+  position: readonly [number, number, number];
+  yaw: number;
+  pitch: number;
+}
 
 export interface FirstPersonState {
   x: number;
@@ -22,11 +57,29 @@ export interface FirstPersonState {
   pitch: number;
   surfaceId: string;
   pointerLocked: boolean;
+  poseLocked: boolean;
+}
+
+interface PoseTransition {
+  fromX: number;
+  fromY: number;
+  fromZ: number;
+  fromYaw: number;
+  fromPitch: number;
+  toX: number;
+  toY: number;
+  toZ: number;
+  toYaw: number;
+  toPitch: number;
+  elapsed: number;
+  duration: number;
+  enteringPose: boolean;
 }
 
 /**
  * Walkable First-Person camera controller (~1.60 m eye height above active floor/step)
- * supporting WASD / Arrow keys, click-drag look, double-click Pointer Lock, and touch look.
+ * with reliable keyboard state sync, drag/pointer-lock mouse-look, jam-proof collisions,
+ * and smooth seated/workstation pose transitions.
  */
 export class FirstPersonController {
   private readonly camera: THREE.PerspectiveCamera;
@@ -48,12 +101,26 @@ export class FirstPersonController {
   private yaw = 0;
   private pitch = -0.02;
 
-  private readonly keys = new Set<string>();
+  // Interactive seated / desk-focus pose state
+  private poseLocked = false;
+  private poseBaseYaw = 0;
+  private poseBasePitch = 0;
+  private savedStandingPose: {
+    x: number;
+    z: number;
+    feetY: number;
+    yaw: number;
+    pitch: number;
+  } | null = null;
+  private transition: PoseTransition | null = null;
+
+  private readonly activeDirs = new Set<MoveDir>();
   private dragging = false;
   private lastMouse = { x: 0, y: 0 };
   private touchLookId: number | null = null;
   private lastTouch = { x: 0, y: 0 };
   private pointerLocked = false;
+  private renderDirty = true;
   private readonly cleanups: Array<() => void> = [];
 
   constructor(
@@ -71,6 +138,18 @@ export class FirstPersonController {
     return this.enabled;
   }
 
+  isInInteractivePose(): boolean {
+    return this.poseLocked || Boolean(this.transition?.enteringPose);
+  }
+
+  clearInputState(): void {
+    this.activeDirs.clear();
+    this.dragging = false;
+    this.touchLookId = null;
+    this.vel.x = 0;
+    this.vel.z = 0;
+  }
+
   getState(): FirstPersonState {
     return {
       x: this.pos.x,
@@ -81,10 +160,12 @@ export class FirstPersonController {
       pitch: this.pitch,
       surfaceId: this.surfaceId,
       pointerLocked: this.pointerLocked,
+      poseLocked: this.poseLocked,
     };
   }
 
   spawnAt(x: number, z: number, yaw = 0, pitch = -0.02, hintFeetY?: number): void {
+    this.cancelPoseImmediate();
     const initialSurf =
       hintFeetY !== undefined
         ? this.world.findSurface(x, z, hintFeetY, false) ??
@@ -103,11 +184,13 @@ export class FirstPersonController {
     this.yaw = yaw;
     this.pitch = pitch;
     this.applyToCamera();
+    this.renderDirty = true;
   }
 
   enable(customSpawn?: { x: number; z: number; yaw?: number; pitch?: number; feetY?: number }): void {
     this.enabled = true;
-    this.keys.clear();
+    this.clearInputState();
+    this.cancelPoseImmediate();
     const def = ATRIUM_CONFIG.navigation.firstPerson.defaultSpawn;
     if (customSpawn) {
       this.spawnAt(
@@ -125,31 +208,138 @@ export class FirstPersonController {
     this.camera.fov = this.camera.aspect < 0.85 ? 74 : 60;
     this.camera.updateProjectionMatrix();
     this.applyToCamera();
+    this.renderDirty = true;
   }
 
   disable(): void {
     this.enabled = false;
-    this.keys.clear();
-    this.dragging = false;
-    this.touchLookId = null;
-    this.vel.x = 0;
-    this.vel.z = 0;
+    this.clearInputState();
+    this.cancelPoseImmediate();
     if (document.pointerLockElement === this.canvas) {
       document.exitPointerLock?.();
     }
   }
 
-  rotateLook(dxPx: number, dyPx: number): void {
-    const sens = 0.0024;
-    this.yaw -= dxPx * sens;
-    this.pitch = Math.max(-1.28, Math.min(1.28, this.pitch - dyPx * sens));
-    if (this.enabled) this.applyToCamera();
+  /**
+   * Smoothly transitions the First-Person camera into a seated chair or desk-focus pose.
+   */
+  enterPose(pose: CameraPose, durationSec = 0.65): void {
+    if (!this.savedStandingPose) {
+      this.savedStandingPose = {
+        x: this.pos.x,
+        z: this.pos.z,
+        feetY: this.feetY,
+        yaw: this.yaw,
+        pitch: this.pitch,
+      };
+    }
+    this.activeDirs.clear();
+    this.vel.x = 0;
+    this.vel.z = 0;
+    this.poseLocked = true;
+    this.poseBaseYaw = pose.yaw;
+    this.poseBasePitch = pose.pitch;
+
+    const targetYaw = this.yaw + normalizeAngleDelta(this.yaw, pose.yaw);
+    this.transition = {
+      fromX: this.pos.x,
+      fromY: this.pos.y,
+      fromZ: this.pos.z,
+      fromYaw: this.yaw,
+      fromPitch: this.pitch,
+      toX: pose.position[0],
+      toY: pose.position[1],
+      toZ: pose.position[2],
+      toYaw: targetYaw,
+      toPitch: pose.pitch,
+      elapsed: 0,
+      duration: Math.max(0.05, durationSec),
+      enteringPose: true,
+    };
+    this.renderDirty = true;
   }
 
   /**
-   * Deterministic movement helper usable both from the animation loop and tests.
+   * Smoothly returns from a seated/focused pose back to the saved standing First-Person pose.
+   */
+  exitPose(durationSec = 0.5): void {
+    if (!this.poseLocked && !this.transition) return;
+    const stand = this.savedStandingPose ?? {
+      x: this.pos.x,
+      z: this.pos.z,
+      feetY: this.feetY,
+      yaw: this.yaw,
+      pitch: -0.02,
+    };
+    const standY = stand.feetY + this.eyeHeight;
+    const targetYaw = this.yaw + normalizeAngleDelta(this.yaw, stand.yaw);
+    this.transition = {
+      fromX: this.pos.x,
+      fromY: this.pos.y,
+      fromZ: this.pos.z,
+      fromYaw: this.yaw,
+      fromPitch: this.pitch,
+      toX: stand.x,
+      toY: standY,
+      toZ: stand.z,
+      toYaw: targetYaw,
+      toPitch: stand.pitch,
+      elapsed: 0,
+      duration: Math.max(0.05, durationSec),
+      enteringPose: false,
+    };
+    this.renderDirty = true;
+  }
+
+  cancelPoseImmediate(): void {
+    if (this.savedStandingPose) {
+      this.pos.x = this.savedStandingPose.x;
+      this.pos.z = this.savedStandingPose.z;
+      this.feetY = this.savedStandingPose.feetY;
+      this.smoothedFeetY = this.savedStandingPose.feetY;
+      this.pos.y = this.smoothedFeetY + this.eyeHeight;
+      this.yaw = this.savedStandingPose.yaw;
+      this.pitch = this.savedStandingPose.pitch;
+      this.savedStandingPose = null;
+    }
+    this.poseLocked = false;
+    this.transition = null;
+    this.renderDirty = true;
+  }
+
+  rotateLook(dxPx: number, dyPx: number): void {
+    if (Math.abs(dxPx) < 1e-4 && Math.abs(dyPx) < 1e-4) return;
+    // Ignore drag-look mid-transition so camera smoothly settles onto seat/desk
+    if (this.transition) return;
+    const sens = 0.0024;
+    if (this.poseLocked) {
+      // Allow comfortable natural head-turn while seated or inspecting a workstation
+      const maxYawOffset = 1.05;
+      const nextYaw = this.yaw - dxPx * sens;
+      const deltaYaw = normalizeAngleDelta(this.poseBaseYaw, nextYaw);
+      this.yaw = this.poseBaseYaw + THREE.MathUtils.clamp(deltaYaw, -maxYawOffset, maxYawOffset);
+      this.pitch = THREE.MathUtils.clamp(
+        this.pitch - dyPx * sens,
+        Math.max(-1.1, this.poseBasePitch - 0.55),
+        Math.min(0.85, this.poseBasePitch + 0.55),
+      );
+    } else {
+      this.yaw -= dxPx * sens;
+      this.pitch = Math.max(-1.28, Math.min(1.28, this.pitch - dyPx * sens));
+    }
+    if (this.enabled) {
+      this.applyToCamera();
+      this.renderDirty = true;
+    }
+  }
+
+  /**
+   * Deterministic movement helper usable both from the animation loop and automated tests.
    */
   stepInput(forwardInput: number, strafeInput: number, dtRaw: number): FirstPersonState {
+    if (this.poseLocked || this.transition) {
+      return this.getState();
+    }
     const dt = Math.min(0.05, Math.max(0.001, dtRaw));
     let fwd = forwardInput;
     let strafe = strafeInput;
@@ -166,18 +356,17 @@ export class FirstPersonController {
     const dirZ = -cosY * fwd - sinY * strafe;
 
     if (len > 0.01) {
-      this.vel.x += dirX * this.accel * dt;
-      this.vel.z += dirZ * this.accel * dt;
-      const spd = Math.hypot(this.vel.x, this.vel.z);
-      if (spd > this.maxSpeed) {
-        this.vel.x = (this.vel.x / spd) * this.maxSpeed;
-        this.vel.z = (this.vel.z / spd) * this.maxSpeed;
-      }
+      // Smooth exponential approach toward target velocity for crisp, framerate-independent feel
+      const targetVx = dirX * this.maxSpeed;
+      const targetVz = dirZ * this.maxSpeed;
+      const accelBlend = 1 - Math.exp(-(this.accel / this.maxSpeed) * dt);
+      this.vel.x += (targetVx - this.vel.x) * accelBlend;
+      this.vel.z += (targetVz - this.vel.z) * accelBlend;
     } else {
       const damp = Math.exp(-this.damping * dt);
       this.vel.x *= damp;
       this.vel.z *= damp;
-      if (Math.hypot(this.vel.x, this.vel.z) < 0.01) {
+      if (Math.hypot(this.vel.x, this.vel.z) < 0.008) {
         this.vel.x = 0;
         this.vel.z = 0;
       }
@@ -194,8 +383,17 @@ export class FirstPersonController {
       this.radius,
     );
 
-    if (Math.abs(resolved.x - nextX) > 1e-4) this.vel.x = 0;
-    if (Math.abs(resolved.z - nextZ) > 1e-4) this.vel.z = 0;
+    // Only zero out the axis that was genuinely blocked so diagonal wall-sliding stays fluid
+    const movedX = resolved.x - this.pos.x;
+    const movedZ = resolved.z - this.pos.z;
+    const wantedX = nextX - this.pos.x;
+    const wantedZ = nextZ - this.pos.z;
+    if (Math.abs(wantedX) > 1e-4 && Math.abs(movedX) < Math.abs(wantedX) * 0.25) {
+      this.vel.x = 0;
+    }
+    if (Math.abs(wantedZ) > 1e-4 && Math.abs(movedZ) < Math.abs(wantedZ) * 0.25) {
+      this.vel.z = 0;
+    }
 
     this.pos.x = resolved.x;
     this.pos.z = resolved.z;
@@ -208,27 +406,70 @@ export class FirstPersonController {
     }
     this.pos.y = this.smoothedFeetY + this.eyeHeight;
     this.applyToCamera();
+    this.renderDirty = true;
     return this.getState();
   }
 
   step(dtRaw: number): boolean {
     if (!this.enabled) return false;
-    let fwd = 0;
-    let strafe = 0;
-    if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) fwd += 1;
-    if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) fwd -= 1;
-    if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) strafe += 1;
-    if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) strafe -= 1;
+    const dt = Math.min(0.05, Math.max(0.001, dtRaw));
 
-    const moving =
-      fwd !== 0 ||
-      strafe !== 0 ||
-      Math.hypot(this.vel.x, this.vel.z) > 0.005 ||
-      Math.abs(this.feetY - this.smoothedFeetY) > 0.002;
-    if (moving) {
-      this.stepInput(fwd, strafe, dtRaw);
+    // Handle smooth camera transition into/out of seated or desk-focus poses
+    if (this.transition) {
+      const tr = this.transition;
+      tr.elapsed = Math.min(tr.duration, tr.elapsed + dt);
+      const t = tr.elapsed / tr.duration;
+      // Smooth cubic ease-in-out
+      const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      this.pos.x = THREE.MathUtils.lerp(tr.fromX, tr.toX, eased);
+      this.pos.y = THREE.MathUtils.lerp(tr.fromY, tr.toY, eased);
+      this.pos.z = THREE.MathUtils.lerp(tr.fromZ, tr.toZ, eased);
+      this.yaw = THREE.MathUtils.lerp(tr.fromYaw, tr.toYaw, eased);
+      this.pitch = THREE.MathUtils.lerp(tr.fromPitch, tr.toPitch, eased);
+      this.applyToCamera();
+
+      if (tr.elapsed >= tr.duration) {
+        const wasEntering = tr.enteringPose;
+        this.transition = null;
+        if (wasEntering) {
+          this.poseBaseYaw = this.yaw;
+          this.poseBasePitch = this.pitch;
+        } else {
+          this.poseLocked = false;
+          if (this.savedStandingPose) {
+            this.feetY = this.savedStandingPose.feetY;
+            this.smoothedFeetY = this.savedStandingPose.feetY;
+            this.savedStandingPose = null;
+          }
+        }
+      }
+      this.renderDirty = false;
+      return true;
     }
-    return moving;
+
+    if (!this.poseLocked) {
+      let fwd = 0;
+      let strafe = 0;
+      if (this.activeDirs.has("fwd")) fwd += 1;
+      if (this.activeDirs.has("back")) fwd -= 1;
+      if (this.activeDirs.has("right")) strafe += 1;
+      if (this.activeDirs.has("left")) strafe -= 1;
+
+      const moving =
+        fwd !== 0 ||
+        strafe !== 0 ||
+        Math.hypot(this.vel.x, this.vel.z) > 0.005 ||
+        Math.abs(this.feetY - this.smoothedFeetY) > 0.002;
+      if (moving) {
+        this.stepInput(fwd, strafe, dt);
+      }
+    }
+
+    if (this.renderDirty) {
+      this.renderDirty = false;
+      return true;
+    }
+    return false;
   }
 
   applyToCamera(): void {
@@ -240,28 +481,53 @@ export class FirstPersonController {
   private bindEvents(): void {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!this.enabled) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      if (MOVE_CODES.has(e.code)) {
+
+      const dir = mapEventToMoveDir(e);
+      if (dir) {
         e.preventDefault();
-        this.keys.add(e.code);
+        // If a toolbar button currently has focus, return focus to canvas so Space/Arrows never hijack controls
+        if (target && target.tagName === "BUTTON") {
+          target.blur();
+          this.canvas.focus({ preventScroll: true });
+        }
+        this.activeDirs.add(dir);
       }
     };
+
     const onKeyUp = (e: KeyboardEvent) => {
-      this.keys.delete(e.code);
+      const dir = mapEventToMoveDir(e);
+      if (dir) {
+        this.activeDirs.delete(dir);
+      }
     };
-    const onBlur = () => {
-      this.keys.clear();
-      this.dragging = false;
+
+    const onFocusLoss = () => {
+      this.clearInputState();
     };
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        this.clearInputState();
+      }
+    };
+
     const onPointerLockChange = () => {
       this.pointerLocked = document.pointerLockElement === this.canvas;
+      if (!this.pointerLocked) {
+        this.dragging = false;
+      }
     };
+
     const onMouseDown = (e: MouseEvent) => {
       if (!this.enabled || e.button !== 0) return;
+      this.canvas.focus({ preventScroll: true });
       this.dragging = true;
       this.lastMouse = { x: e.clientX, y: e.clientY };
     };
+
     const onDblClick = () => {
       if (!this.enabled) return;
       if (!this.pointerLocked && this.canvas.requestPointerLock) {
@@ -272,18 +538,26 @@ export class FirstPersonController {
         }
       }
     };
+
     const onMouseMove = (e: MouseEvent) => {
       if (!this.enabled) return;
       if (this.pointerLocked) {
         this.rotateLook(e.movementX || 0, e.movementY || 0);
       } else if (this.dragging) {
+        // Guard against mouse button released outside window
+        if ((e.buttons & 1) === 0) {
+          this.dragging = false;
+          return;
+        }
         this.rotateLook(e.clientX - this.lastMouse.x, e.clientY - this.lastMouse.y);
         this.lastMouse = { x: e.clientX, y: e.clientY };
       }
     };
+
     const onMouseUp = () => {
       this.dragging = false;
     };
+
     const onTouchStart = (e: TouchEvent) => {
       if (!this.enabled || this.touchLookId !== null) return;
       const t = e.changedTouches[0];
@@ -291,17 +565,22 @@ export class FirstPersonController {
       this.touchLookId = t.identifier;
       this.lastTouch = { x: t.clientX, y: t.clientY };
     };
+
     const onTouchMove = (e: TouchEvent) => {
       if (!this.enabled || this.touchLookId === null) return;
       for (let i = 0; i < e.changedTouches.length; i++) {
         const t = e.changedTouches[i];
         if (t.identifier === this.touchLookId) {
           e.preventDefault();
-          this.rotateLook((t.clientX - this.lastTouch.x) * 1.35, (t.clientY - this.lastTouch.y) * 1.35);
+          this.rotateLook(
+            (t.clientX - this.lastTouch.x) * 1.35,
+            (t.clientY - this.lastTouch.y) * 1.35,
+          );
           this.lastTouch = { x: t.clientX, y: t.clientY };
         }
       }
     };
+
     const onTouchEnd = (e: TouchEvent) => {
       for (let i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === this.touchLookId) {
@@ -312,7 +591,9 @@ export class FirstPersonController {
 
     window.addEventListener("keydown", onKeyDown, { passive: false });
     window.addEventListener("keyup", onKeyUp);
-    window.addEventListener("blur", onBlur);
+    window.addEventListener("blur", onFocusLoss);
+    window.addEventListener("contextmenu", onFocusLoss);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     document.addEventListener("pointerlockchange", onPointerLockChange);
     this.canvas.addEventListener("mousedown", onMouseDown);
     this.canvas.addEventListener("dblclick", onDblClick);
@@ -326,7 +607,9 @@ export class FirstPersonController {
     this.cleanups.push(() => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("blur", onFocusLoss);
+      window.removeEventListener("contextmenu", onFocusLoss);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       document.removeEventListener("pointerlockchange", onPointerLockChange);
       this.canvas.removeEventListener("mousedown", onMouseDown);
       this.canvas.removeEventListener("dblclick", onDblClick);

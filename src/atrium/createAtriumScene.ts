@@ -2,7 +2,12 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { ATRIUM_CONFIG, type AtriumViewMode } from "./config";
-import { GeometryKit, bucketToGeometry, type LineKind } from "./geometry/solid";
+import {
+  GeometryKit,
+  bucketToGeometry,
+  type LineKind,
+  type MaterialKind,
+} from "./geometry/solid";
 import { createAtriumMaterials } from "./materials";
 import { buildArchitecture } from "./builders/architecture";
 import { buildStaircase } from "./builders/staircase";
@@ -10,6 +15,10 @@ import { buildFurniture } from "./builders/furniture";
 import { buildPlants } from "./builders/plants";
 import { CollisionWorld } from "./navigation/collisionWorld";
 import { FirstPersonController, type FirstPersonState } from "./navigation/firstPersonController";
+import {
+  AtriumInteractionManager,
+  type InteractionSnapshot,
+} from "./interaction/interactionManager";
 
 export interface AtriumDiagnostics {
   renderer: "three-webgl";
@@ -18,6 +27,7 @@ export interface AtriumDiagnostics {
   cameraPosition: [number, number, number];
   orbitTarget: [number, number, number];
   firstPerson: FirstPersonState;
+  interaction: InteractionSnapshot;
   solidMeshCount: number;
   triangleCount: number;
   colliderCount: number;
@@ -34,8 +44,12 @@ export interface AtriumSceneApi {
   animateDoorsOpen: (durationMs?: number) => void;
   setOrbitPose: (position: [number, number, number], target: [number, number, number]) => void;
   spawnFirstPerson: (x: number, z: number, yaw?: number, pitch?: number, feetY?: number) => FirstPersonState;
-  stepFirstPerson: (forward: number, strafe: number, dt: number) => FirstPersonState;
+  stepFirstPerson: (forward: number, strafe: number, dt: number, skipRender?: boolean) => FirstPersonState;
   rotateFirstPerson: (dxPx: number, dyPx: number) => FirstPersonState;
+  setHoldInteract: (holding: boolean) => InteractionSnapshot;
+  stepInteraction: (dt: number, skipRender?: boolean) => InteractionSnapshot;
+  exitInteraction: () => InteractionSnapshot;
+  getInteractionState: () => InteractionSnapshot;
   getDiagnostics: () => AtriumDiagnostics;
   resize: () => void;
   dispose: () => void;
@@ -70,7 +84,7 @@ export function createAtriumScene({
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.toneMappingExposure = 0.96;
+  renderer.toneMappingExposure = 0.97;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.shadowMap.autoUpdate = false;
@@ -78,7 +92,7 @@ export function createAtriumScene({
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(visualStyle.background);
 
-  // Procedural studio environment (zero external textures) for realistic subtle glass reflections & soft white bounce
+  // Procedural studio environment (zero external textures) for subtle glass reflections & soft bounce
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
   const studioEnvScene = new RoomEnvironment();
   const envRenderTarget = pmremGenerator.fromScene(studioEnvScene, 0.04);
@@ -144,17 +158,39 @@ export function createAtriumScene({
     triangleCount += Math.floor(idxCount / 3);
   };
 
-  // 1. Watertight architectural building shell
+  // 1. Watertight architectural building shell (matte white walls/ceilings + warm-gray floors)
   addSolidMesh("building-shell", arch.shellGeometry, materials.clay, true, true, 0);
+  addSolidMesh("building-floors", arch.shellFloorGeometry, materials.floor, false, true, 0);
   const shellLines = materials.createLines("structure", arch.shellEdges);
   if (shellLines) {
     disposableGeometries.push(shellLines.geometry);
     atriumRoot.add(shellLines);
   }
 
-  // 2. Bucketed interior architecture, staircase, furniture, plants & physical glass
-  addSolidMesh("clay-assemblies", bucketToGeometry(kit.buckets.clay), materials.clay, true, true, 0);
-  addSolidMesh("plant-foliage", bucketToGeometry(kit.buckets.plant), materials.plant, true, true, 0);
+  // 2. Bucketed interior architecture, staircase, furniture, accents, plants & physical glass
+  const opaqueKinds: MaterialKind[] = [
+    "clay",
+    "floor",
+    "chair",
+    "chairBase",
+    "sofa",
+    "desk",
+    "tech",
+    "accentBlue",
+    "accentBeige",
+    "accentGold",
+    "plant",
+  ];
+  for (const kind of opaqueKinds) {
+    addSolidMesh(
+      `assembly-${kind}`,
+      bucketToGeometry(kit.buckets[kind]),
+      materials.byKind[kind],
+      true,
+      true,
+      0,
+    );
+  }
   addSolidMesh("glass-glazing", bucketToGeometry(kit.buckets.glass), materials.glass, false, false, 3);
 
   // 3. Hinged monumental double entrance doors (count their triangles too)
@@ -189,7 +225,7 @@ export function createAtriumScene({
     atriumRoot.add(shadowMesh);
   }
 
-  // ---- Studio Clay & Sunlight Shadow Rig ----
+  // ---- Soft Champagne-Gold Architectural Studio Lighting Rig ----
   const hemi = new THREE.HemisphereLight(
     new THREE.Color(lighting.hemisphereSky),
     new THREE.Color(lighting.hemisphereGround),
@@ -197,7 +233,7 @@ export function createAtriumScene({
   );
   scene.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xffffff, lighting.sunIntensity);
+  const sun = new THREE.DirectionalLight(new THREE.Color(lighting.sunColor), lighting.sunIntensity);
   sun.position.set(...lighting.sunPosition);
   sun.target.position.set(...lighting.sunTarget);
   sun.castShadow = true;
@@ -213,29 +249,31 @@ export function createAtriumScene({
   sun.shadow.radius = 2.8;
   scene.add(sun, sun.target);
 
-  // Soft balanced architectural fill lights so matte white surfaces show clean planar separation without clipping
-  const fill = new THREE.DirectionalLight(0xffffff, 0.32);
+  // Subtle champagne-gold architectural fill + cool-neutral rear bounce
+  const fill = new THREE.DirectionalLight(new THREE.Color(lighting.fillColor), lighting.fillIntensity);
   fill.position.set(9.0, 7.5, 10.5);
   scene.add(fill);
 
-  const backBounce = new THREE.DirectionalLight(0xf6f7f9, 0.16);
+  const backBounce = new THREE.DirectionalLight(0xf6f4ee, 0.16);
   backBounce.position.set(-4.0, 4.5, -12.0);
   scene.add(backBounce);
 
-  // Broad, gentle interior alcove fill lights placed clear of soffits & walls (zero glare blobs)
+  // Warm champagne-gold interior alcove cove lights placed clear of soffits & walls
+  const alcoveColor = new THREE.Color(lighting.alcoveColor);
+  const alcoveBase = lighting.alcoveIntensity;
   const alcoveLights: Array<[number, number, number, number, number]> = [
-    [-2.8, 2.25, -5.8, 0.24, 11],
-    [-3.6, 2.15, -11.4, 0.28, 9],
-    [1.8, 2.15, -6.6, 0.24, 10],
-    [3.4, 5.1, -6.6, 0.24, 12],
+    [-2.8, 2.25, -5.8, alcoveBase, 11],
+    [-3.6, 2.15, -11.4, alcoveBase * 1.12, 9],
+    [1.8, 2.15, -6.6, alcoveBase, 10],
+    [3.4, 5.1, -6.6, alcoveBase * 0.95, 12],
   ];
   for (const [lx, ly, lz, inten, dist] of alcoveLights) {
-    const pl = new THREE.PointLight(0xffffff, inten, dist, 1.0);
+    const pl = new THREE.PointLight(alcoveColor, inten, dist, 1.0);
     pl.position.set(lx, ly, lz);
     scene.add(pl);
   }
 
-  // ---- OrbitControls & FirstPersonController ----
+  // ---- OrbitControls, FirstPersonController & Selected-Object Interaction Manager ----
   const orbitControls = new OrbitControls(camera, canvas);
   orbitControls.enableDamping = true;
   orbitControls.dampingFactor = navigation.orbit.dampingFactor;
@@ -245,6 +283,7 @@ export function createAtriumScene({
   orbitControls.screenSpacePanning = true;
 
   const fpController = new FirstPersonController(camera, canvas, collisionWorld);
+  const interactionManager = new AtriumInteractionManager(host, camera, fpController);
 
   let viewMode: AtriumViewMode = initialMode;
   let disposed = false;
@@ -261,6 +300,8 @@ export function createAtriumScene({
     const fp = fpController.getState();
     host.dataset.fpFeetY = fp.feetY.toFixed(2);
     host.dataset.fpSurface = fp.surfaceId;
+    const inter = interactionManager.getSnapshot();
+    host.dataset.interactionTarget = inter.activeTargetId ?? inter.nearestTargetId ?? "";
   }
 
   function applyDefaultOrbitView(): void {
@@ -278,12 +319,15 @@ export function createAtriumScene({
     if (disposed) return;
     viewMode = nextMode;
     if (nextMode === "orbit") {
+      interactionManager.setEnabled(false);
       fpController.disable();
       orbitControls.enabled = true;
       applyDefaultOrbitView();
     } else {
       orbitControls.enabled = false;
       fpController.enable();
+      interactionManager.setEnabled(true);
+      interactionManager.update(0.016);
       canvas.focus({ preventScroll: true });
     }
     onModeChange?.(nextMode);
@@ -295,7 +339,10 @@ export function createAtriumScene({
     if (viewMode === "orbit") {
       applyDefaultOrbitView();
     } else {
+      interactionManager.resetAll(true);
       fpController.enable();
+      interactionManager.update(0.016);
+      canvas.focus({ preventScroll: true });
     }
     renderFrame();
   }
@@ -319,6 +366,9 @@ export function createAtriumScene({
       camera.fov = camera.aspect < 0.85 ? 74 : 60;
     }
     camera.updateProjectionMatrix();
+    if (viewMode === "firstPerson") {
+      interactionManager.update(0.016);
+    }
     renderFrame();
   }
 
@@ -356,14 +406,13 @@ export function createAtriumScene({
   const loop = (now: number) => {
     if (disposed) return;
     rafId = requestAnimationFrame(loop);
-    const dt = Math.min(0.08, Math.max(0.001, (now - prevTime) / 1000));
+    const dt = Math.min(0.05, Math.max(0.001, (now - prevTime) / 1000));
     prevTime = now;
 
     let needsRender = false;
 
     if (doorAnimActive) {
       const raw = THREE.MathUtils.clamp((now - doorAnimStart) / doorAnimDuration, 0, 1);
-      // Smooth cubic ease-out for architectural portal leaves
       const eased = 1 - Math.pow(1 - raw, 3);
       arch.doors.setOpenProgress(eased);
       needsRender = true;
@@ -380,6 +429,9 @@ export function createAtriumScene({
       }
     } else {
       if (fpController.step(dt)) {
+        needsRender = true;
+      }
+      if (interactionManager.update(dt)) {
         needsRender = true;
       }
     }
@@ -410,22 +462,45 @@ export function createAtriumScene({
     },
     spawnFirstPerson(x, z, yaw = 0, pitch = -0.02, feetY) {
       if (viewMode !== "firstPerson") setMode("firstPerson");
+      interactionManager.resetAll(true);
       fpController.spawnAt(x, z, yaw, pitch, feetY);
+      interactionManager.update(0.016);
       renderFrame();
       return fpController.getState();
     },
-    stepFirstPerson(forward, strafe, dt) {
+    stepFirstPerson(forward, strafe, dt, skipRender = false) {
       if (viewMode !== "firstPerson") setMode("firstPerson");
       const state = fpController.stepInput(forward, strafe, dt);
-      renderFrame();
+      interactionManager.update(dt);
+      if (!skipRender) renderFrame();
       return state;
     },
     rotateFirstPerson(dxPx, dyPx) {
       if (viewMode !== "firstPerson") setMode("firstPerson");
       fpController.rotateLook(dxPx, dyPx);
+      interactionManager.update(0.016);
       renderFrame();
       return fpController.getState();
     },
+    setHoldInteract(holding) {
+      interactionManager.setHoldingInteract(holding);
+      interactionManager.update(0.016);
+      renderFrame();
+      return interactionManager.getSnapshot();
+    },
+    stepInteraction(dt, skipRender = false) {
+      fpController.step(dt);
+      interactionManager.update(dt);
+      if (!skipRender) renderFrame();
+      return interactionManager.getSnapshot();
+    },
+    exitInteraction() {
+      interactionManager.exitActiveInteraction(false);
+      fpController.step(0.016);
+      renderFrame();
+      return interactionManager.getSnapshot();
+    },
+    getInteractionState: () => interactionManager.getSnapshot(),
     getDiagnostics() {
       const usedMats = new Set<string>();
       let hasTextures = false;
@@ -434,7 +509,7 @@ export function createAtriumScene({
         if (!mesh.isMesh) return;
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
         for (const m of mats) {
-          if (m.name !== "contact-shadow") usedMats.add(m.name);
+          if (m.name && m.name !== "contact-shadow") usedMats.add(m.name);
           const std = m as THREE.MeshStandardMaterial;
           if (std.map || std.normalMap || std.roughnessMap || std.metalnessMap) {
             hasTextures = true;
@@ -456,6 +531,7 @@ export function createAtriumScene({
           +orbitControls.target.z.toFixed(3),
         ],
         firstPerson: fpController.getState(),
+        interaction: interactionManager.getSnapshot(),
         solidMeshCount,
         triangleCount,
         colliderCount: collisionWorld.getColliderCount(),
@@ -470,6 +546,7 @@ export function createAtriumScene({
       disposed = true;
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
+      interactionManager.dispose();
       fpController.dispose();
       orbitControls.dispose();
       arch.doors.dispose();

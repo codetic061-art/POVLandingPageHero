@@ -3,12 +3,18 @@ import { ATRIUM_CONFIG } from "../config";
 import {
   GeometryKit,
   RectSolid,
+  type MaterialKind,
   type PrototypeData,
   bakePrototype,
   bevelPad,
   transformGeometry,
 } from "../geometry/solid";
 import type { CollisionWorld } from "../navigation/collisionWorld";
+
+interface TwoTonePrototype {
+  primary: PrototypeData;
+  secondary: PrototypeData;
+}
 
 /**
  * Extrudes a 2D profile defined in the side (Z, Y) plane across width `widthX`
@@ -39,23 +45,24 @@ function extrudeSideProfile(
 
 /**
  * Builds a sculpted ergonomic 5-star caster swivel office task chair prototype
- * (centered at X=0, Z=0, casters resting cleanly on Y=0, facing +Z).
+ * (primary: muted blue-gray slate shell & cushions; secondary: matte charcoal base, stem & casters).
  */
-function createSwivelChairPrototype(): PrototypeData {
-  const parts: THREE.BufferGeometry[] = [];
+function createSwivelChairPrototype(): TwoTonePrototype {
+  const shellParts: THREE.BufferGeometry[] = [];
+  const baseParts: THREE.BufferGeometry[] = [];
 
   // Central pneumatic gas-lift column, tapered collar, and base hub
   const hub = new THREE.CylinderGeometry(0.04, 0.048, 0.056, 14);
   hub.translate(0, 0.112, 0);
-  parts.push(hub);
+  baseParts.push(hub);
 
   const lowerStem = new THREE.CylinderGeometry(0.026, 0.03, 0.17, 14);
   lowerStem.translate(0, 0.22, 0);
-  parts.push(lowerStem);
+  baseParts.push(lowerStem);
 
   const upperStem = new THREE.CylinderGeometry(0.02, 0.023, 0.15, 14);
   upperStem.translate(0, 0.35, 0);
-  parts.push(upperStem);
+  baseParts.push(upperStem);
 
   // 5-star tapered architectural caster legs + dual-wheel hooded casters resting on Y = 0
   const legRadius = 0.285;
@@ -65,36 +72,33 @@ function createSwivelChairPrototype(): PrototypeData {
     spoke.rotateX(0.11);
     spoke.translate(0, 0.088, legRadius / 2);
     spoke.rotateY(ang);
-    parts.push(spoke);
+    baseParts.push(spoke);
 
     const wheelX = Math.sin(ang) * (legRadius - 0.016);
     const wheelZ = Math.cos(ang) * (legRadius - 0.016);
 
-    // Dual-wheel caster assembly
     const wheel = new THREE.CylinderGeometry(0.026, 0.026, 0.032, 14);
     wheel.rotateZ(Math.PI / 2);
     wheel.rotateY(ang);
     wheel.translate(wheelX, 0.026, wheelZ);
-    parts.push(wheel);
+    baseParts.push(wheel);
 
-    // Caster hood & vertical stem pin
     const hood = bevelPad(0.038, 0.018, 0.044, 0.01, 0.004, 4);
     hood.rotateY(ang);
     hood.translate(wheelX, 0.044, wheelZ);
-    parts.push(hood);
+    baseParts.push(hood);
 
     const pin = new THREE.CylinderGeometry(0.01, 0.01, 0.038, 10);
     pin.translate(wheelX, 0.068, wheelZ);
-    parts.push(pin);
+    baseParts.push(pin);
   }
 
   // Under-seat synchronized tilt mechanism housing (tucked cleanly beneath the seat shell)
   const mech = bevelPad(0.17, 0.042, 0.2, 0.016, 0.006, 4);
   mech.translate(0, 0.402, -0.01);
-  parts.push(mech);
+  baseParts.push(mech);
 
   // Sculpted continuous curved ergonomic chair shell (waterfall seat + lumbar curve + reclined back)
-  // Shape coords: x = +Z (forward), y = +Y (up)
   const shellShape = new THREE.Shape();
   shellShape.moveTo(0.22, 0.44);
   shellShape.quadraticCurveTo(0.232, 0.468, 0.18, 0.478);
@@ -108,60 +112,61 @@ function createSwivelChairPrototype(): PrototypeData {
   shellShape.lineTo(0.185, 0.432);
   shellShape.quadraticCurveTo(0.215, 0.432, 0.22, 0.44);
   const shell = extrudeSideProfile(shellShape, 0.46, 0.009, 10);
-  parts.push(shell);
+  shellParts.push(shell);
 
   // Plush contoured inner seat cushion pad nestled on top of the shell
   const seatPad = bevelPad(0.41, 0.032, 0.36, 0.042, 0.009, 5);
   seatPad.translate(0, 0.468, 0.025);
-  parts.push(seatPad);
+  shellParts.push(seatPad);
 
-  // Clean non-self-intersecting architectural C-loop armrests (outer profile clockwise, hollow-free sleek swept arm)
+  // Clean architectural C-loop armrests in charcoal connecting seat & back
   const armShape = new THREE.Shape();
-  armShape.moveTo(0.035, 0.452); // Seat side mount front
-  armShape.lineTo(0.088, 0.595); // Swept front support rising
-  armShape.quadraticCurveTo(0.108, 0.658, 0.055, 0.668); // Smooth front elbow curve
-  armShape.lineTo(-0.155, 0.668); // Horizontal forearm pad top
-  armShape.quadraticCurveTo(-0.202, 0.668, -0.214, 0.635); // Rear join into backrest
+  armShape.moveTo(0.035, 0.452);
+  armShape.lineTo(0.088, 0.595);
+  armShape.quadraticCurveTo(0.108, 0.658, 0.055, 0.668);
+  armShape.lineTo(-0.155, 0.668);
+  armShape.quadraticCurveTo(-0.202, 0.668, -0.214, 0.635);
   armShape.lineTo(-0.214, 0.610);
-  armShape.quadraticCurveTo(-0.185, 0.638, -0.145, 0.638); // Forearm pad underside
+  armShape.quadraticCurveTo(-0.185, 0.638, -0.145, 0.638);
   armShape.lineTo(0.038, 0.638);
-  armShape.quadraticCurveTo(0.068, 0.638, 0.052, 0.592); // Inner front leg curve
-  armShape.lineTo(0.004, 0.452); // Seat side mount rear
+  armShape.quadraticCurveTo(0.068, 0.638, 0.052, 0.592);
+  armShape.lineTo(0.004, 0.452);
   armShape.closePath();
 
   for (const side of [-1, 1] as const) {
     const arm = extrudeSideProfile(armShape, 0.034, 0.005, 8);
     arm.translate(side * 0.238, 0, 0);
-    parts.push(arm);
+    baseParts.push(arm);
   }
 
-  return bakePrototype(parts, 28);
+  return {
+    primary: bakePrototype(shellParts, 28),
+    secondary: bakePrototype(baseParts, 28),
+  };
 }
 
 /**
- * Builds a sculpted modern lounge armchair prototype with gently sloped rounded arms,
- * angled backrest shell, plush cushions, and clean splayed legs (facing +Z).
+ * Builds a sculpted modern lounge armchair prototype
+ * (primary: muted dusty-blue upholstery; secondary: charcoal splayed tapered legs).
  */
-function createLoungeArmchairPrototype(): PrototypeData {
-  const parts: THREE.BufferGeometry[] = [];
+function createLoungeArmchairPrototype(): TwoTonePrototype {
+  const bodyParts: THREE.BufferGeometry[] = [];
+  const legParts: THREE.BufferGeometry[] = [];
 
-  // 4 clean splayed tapered legs touching Y = 0
   for (const sx of [-1, 1] as const) {
     for (const sz of [-1, 1] as const) {
       const leg = new THREE.CylinderGeometry(0.022, 0.013, 0.21, 10);
       leg.rotateZ(sx * 0.13);
       leg.rotateX(-sz * 0.13);
       leg.translate(sx * 0.31, 0.10, sz * 0.27);
-      parts.push(leg);
+      legParts.push(leg);
     }
   }
 
-  // Lower upholstered frame apron
   const base = bevelPad(0.78, 0.125, 0.72, 0.06, 0.014, 5);
   base.translate(0, 0.185, 0.01);
-  parts.push(base);
+  bodyParts.push(base);
 
-  // Softly contoured sloped side arms (smooth rounded profile in YZ plane)
   const armProfile = new THREE.Shape();
   armProfile.moveTo(0.36, 0.21);
   armProfile.lineTo(0.36, 0.51);
@@ -174,10 +179,9 @@ function createLoungeArmchairPrototype(): PrototypeData {
   for (const side of [-1, 1] as const) {
     const arm = extrudeSideProfile(armProfile, 0.125, 0.014, 8);
     arm.translate(side * 0.34, 0, 0);
-    parts.push(arm);
+    bodyParts.push(arm);
   }
 
-  // Reclined wrap-around outer back shell
   const backProfile = new THREE.Shape();
   backProfile.moveTo(-0.21, 0.21);
   backProfile.lineTo(-0.24, 0.735);
@@ -186,46 +190,46 @@ function createLoungeArmchairPrototype(): PrototypeData {
   backProfile.lineTo(-0.34, 0.21);
   backProfile.closePath();
   const backShell = extrudeSideProfile(backProfile, 0.76, 0.016, 8);
-  parts.push(backShell);
+  bodyParts.push(backShell);
 
-  // Plump softly beveled seat cushion
   const seat = bevelPad(0.56, 0.135, 0.57, 0.055, 0.018, 5);
   seat.translate(0, 0.30, 0.06);
-  parts.push(seat);
+  bodyParts.push(seat);
 
-  // Angled plush back cushion pillow nestled comfortably inside the shell
   const backCushion = bevelPad(0.55, 0.37, 0.135, 0.055, 0.018, 5);
   backCushion.rotateX(-0.19);
   backCushion.translate(0, 0.415, -0.155);
-  parts.push(backCushion);
+  bodyParts.push(backCushion);
 
-  return bakePrototype(parts, 30);
+  return {
+    primary: bakePrototype(bodyParts, 30),
+    secondary: bakePrototype(legParts, 30),
+  };
 }
 
 /**
- * Builds a sculpted modern 4-leg curved-shell collaborative meeting chair prototype (facing +Z).
+ * Builds a sculpted modern 4-leg curved-shell collaborative meeting chair prototype
+ * (primary: muted slate blue-gray curved shell; secondary: charcoal legs & under-cradle).
  */
-function createMeetingChairPrototype(): PrototypeData {
-  const parts: THREE.BufferGeometry[] = [];
+function createMeetingChairPrototype(): TwoTonePrototype {
+  const shellParts: THREE.BufferGeometry[] = [];
+  const legParts: THREE.BufferGeometry[] = [];
   const seatH = 0.445;
 
-  // 4 clean tapered splayed legs + under-seat mounting spider
   for (const sx of [-1, 1] as const) {
     for (const sz of [-1, 1] as const) {
       const leg = new THREE.CylinderGeometry(0.017, 0.011, seatH + 0.01, 10);
       leg.rotateZ(sx * 0.095);
       leg.rotateX(-sz * 0.095);
       leg.translate(sx * 0.185, seatH / 2, sz * 0.185);
-      parts.push(leg);
+      legParts.push(leg);
     }
   }
 
-  // Under-seat structural cross cradle
   const underFrame = bevelPad(0.32, 0.024, 0.32, 0.03, 0.006, 4);
   underFrame.translate(0, seatH - 0.02, 0.0);
-  parts.push(underFrame);
+  legParts.push(underFrame);
 
-  // Continuous sculpted curved seat + ergonomic backrest shell (side profile in YZ plane)
   const shellShape = new THREE.Shape();
   shellShape.moveTo(0.21, seatH - 0.005);
   shellShape.quadraticCurveTo(0.222, seatH + 0.022, 0.17, seatH + 0.032);
@@ -240,55 +244,62 @@ function createMeetingChairPrototype(): PrototypeData {
   shellShape.quadraticCurveTo(0.205, seatH - 0.01, 0.21, seatH - 0.005);
 
   const shell = extrudeSideProfile(shellShape, 0.45, 0.008, 10);
-  parts.push(shell);
+  shellParts.push(shell);
 
-  return bakePrototype(parts, 28);
+  return {
+    primary: bakePrototype(shellParts, 28),
+    secondary: bakePrototype(legParts, 28),
+  };
 }
 
 /**
- * Builds a properly hinged 3D open laptop prototype (base resting on Y=0,
- * hinge firmly connected at rear edge, open display facing +Z).
+ * Builds a properly hinged 3D open laptop prototype
+ * (primary: graphite dark-gray chassis/lid; secondary: subtle muted blue screen display surface).
  */
-function createLaptopPrototype(): PrototypeData {
-  const parts: THREE.BufferGeometry[] = [];
+function createLaptopPrototype(): TwoTonePrototype {
+  const bodyParts: THREE.BufferGeometry[] = [];
+  const accentParts: THREE.BufferGeometry[] = [];
   const w = 0.34;
   const d = 0.235;
   const baseH = 0.013;
   const screenH = 0.225;
   const screenT = 0.009;
 
-  // Slim beveled chassis base
   const base = bevelPad(w, baseH, d, 0.014, 0.003, 5);
-  parts.push(base);
+  bodyParts.push(base);
 
-  // Subtle recessed keyboard island & trackpad detail
   const keys = bevelPad(w - 0.044, 0.003, d * 0.46, 0.005, 0.001, 3);
   keys.translate(0, baseH - 0.0005, -0.024);
-  parts.push(keys);
+  bodyParts.push(keys);
 
   const trackpad = bevelPad(0.105, 0.0025, 0.068, 0.005, 0.0008, 3);
   trackpad.translate(0, baseH - 0.0005, 0.062);
-  parts.push(trackpad);
+  bodyParts.push(trackpad);
 
-  // Cylindrical hinge clutch along rear edge connecting base and display
   const hingeZ = -d / 2 + 0.011;
   const hingeY = baseH;
   const hinge = new THREE.CylinderGeometry(0.0055, 0.0055, w * 0.72, 10);
   hinge.rotateZ(Math.PI / 2);
   hinge.translate(0, hingeY, hingeZ);
-  parts.push(hinge);
+  bodyParts.push(hinge);
 
-  // Properly hinged angled display lid (bottom edge pivots cleanly right on the hinge barrel!)
   const screen = bevelPad(w, screenT, screenH, 0.012, 0.0025, 5);
-  // Shift so local Z runs from 0 (bottom hinge edge) to +screenH (top edge)
   screen.translate(0, -screenT / 2, screenH / 2);
-  // Rotate upward around the bottom hinge edge (X-axis) to ~104 deg open angle (facing +Z)
   screen.rotateX(-Math.PI / 2 - 0.24);
-  // Place hinge pivot directly onto the rear clutch barrel
   screen.translate(0, hingeY, hingeZ);
-  parts.push(screen);
+  bodyParts.push(screen);
 
-  return bakePrototype(parts, 36);
+  // Subtle recessed blue display inset on inner (+Z) screen face
+  const display = new THREE.BoxGeometry(w - 0.032, 0.002, screenH - 0.036);
+  display.translate(0, -(screenT / 2 + 0.0005), screenH / 2 + 0.004);
+  display.rotateX(-Math.PI / 2 - 0.24);
+  display.translate(0, hingeY, hingeZ);
+  accentParts.push(display);
+
+  return {
+    primary: bakePrototype(bodyParts, 36),
+    secondary: bakePrototype(accentParts, 36),
+  };
 }
 
 function addWorkDesk(
@@ -310,12 +321,12 @@ function addWorkDesk(
   const z0 = cz - lengthZ / 2;
   const z1 = cz + lengthZ / 2;
 
-  // Smooth chamfered tabletop
+  // Subtle light neutral tabletop
   const top = bevelPad(widthX, topT, lengthZ, 0.018, 0.006, 5);
   transformGeometry(top, cx, y0 + height - topT, cz);
-  kit.geo("clay", top, "furniture", 36);
+  kit.geo("desk", top, "furniture", 36);
 
-  // Watertight structural leg + under-top apron frame (RectSolid eliminates all leg-to-apron overlap seams!)
+  // Watertight structural leg + under-top apron frame in light neutral tone
   const legY1 = y0 + height - topT;
   const inset = 0.042;
   const frameSolid = new RectSolid();
@@ -324,13 +335,12 @@ function addWorkDesk(
       frameSolid.add(lx, y0, lz, lx + legW, legY1, lz + legW);
     }
   }
-  // Recessed perimeter structural apron rails under tabletop
   const apronY0 = legY1 - 0.056;
   frameSolid.add(x0 + inset, apronY0, z0 + inset + 0.012, x1 - inset, legY1, z0 + inset + 0.042);
   frameSolid.add(x0 + inset, apronY0, z1 - inset - 0.042, x1 - inset, legY1, z1 - inset - 0.012);
   frameSolid.add(x0 + inset + 0.012, apronY0, z0 + inset, x0 + inset + 0.042, legY1, z1 - inset);
   frameSolid.add(x1 - inset - 0.042, apronY0, z0 + inset, x1 - inset - 0.012, legY1, z1 - inset);
-  kit.solid("clay", frameSolid, "furniture");
+  kit.solid("desk", frameSolid, "furniture");
 
   if (includePedestal) {
     const pedW = 0.42;
@@ -341,8 +351,7 @@ function addWorkDesk(
     const pedSolid = new RectSolid();
     pedSolid.add(px0 + 0.015, y0, pz0 + 0.015, px0 + pedW - 0.015, y0 + 0.035, pz0 + pedD - 0.015);
     pedSolid.add(px0, y0 + 0.035, pz0, px0 + pedW, y0 + 0.02 + pedH, pz0 + pedD);
-    kit.solid("clay", pedSolid, "furniture");
-    // Subtle drawer front reveals
+    kit.solid("desk", pedSolid, "furniture");
     for (const dy of [0.24, 0.44]) {
       kit.segment("detail", px0 + 0.02, y0 + dy, pz0 + pedD + 0.002, px0 + pedW - 0.02, y0 + dy, pz0 + pedD + 0.002);
     }
@@ -354,7 +363,7 @@ function addWorkDesk(
 
 /**
  * Adds a refined architectural storage credenza with recessed toe-kick, beveled top,
- * and articulated cabinet doors.
+ * and articulated cabinet doors in subtle light neutral stone tone.
  */
 function addCredenza(
   kit: GeometryKit,
@@ -387,11 +396,11 @@ function addCredenza(
       cabSolid.add(x0, y0 + 0.09, dz0, x0 + 0.018, y0 + h - 0.052, dz0 + dw);
     }
   }
-  kit.solid("clay", cabSolid, "furniture");
+  kit.solid("desk", cabSolid, "furniture");
 
   const counter = bevelPad(x1 - x0 + 0.02, 0.034, Math.abs(z0 - z1) + 0.02, 0.01, 0.004, 4);
   transformGeometry(counter, (x0 + x1) / 2, y0 + h - 0.034, (z0 + z1) / 2);
-  kit.geo("clay", counter, "furniture", 36);
+  kit.geo("desk", counter, "furniture", 36);
 
   kit.contactShadow((x0 + x1) / 2, y0 + 0.002, (z0 + z1) / 2, x1 - x0 + 0.12, Math.abs(z0 - z1) + 0.12, 0.14);
   collisionWorld.addCollider(tag, x0, y0, z1, x1, y0 + h + 0.15, z0);
@@ -410,7 +419,21 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
   const meetingChairProto = createMeetingChairPrototype();
   const laptopProto = createLaptopPrototype();
 
-  // ---- 1. Left Ground-Floor Collaborative Desk, Laptop & 3 Sculpted Swivel Chairs ----
+  const stampTwoTone = (
+    proto: TwoTonePrototype,
+    primaryMat: MaterialKind,
+    secondaryMat: MaterialKind,
+    x: number,
+    y: number,
+    z: number,
+    yaw: number,
+    lineKind: "furniture" | "detail" = "furniture",
+  ) => {
+    kit.stamp(primaryMat, proto.primary, x, y, z, yaw, lineKind);
+    kit.stamp(secondaryMat, proto.secondary, x, y, z, yaw, lineKind);
+  };
+
+  // ---- 1. Left Ground-Floor Collaborative Desk, Graphite Laptop & 3 Slate Swivel Chairs ----
   const ld = furniture.leftDesk;
   addWorkDesk(
     kit,
@@ -424,11 +447,11 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     ld.height,
     true,
   );
-  // Properly hinged open 3D laptop + sleek notebook on the left desk
-  kit.stamp("clay", laptopProto, ld.cx + 0.06, ld.height, ld.cz + 0.16, Math.PI * 0.48, "detail");
+  // Properly hinged open graphite 3D laptop with blue screen detail + muted blue-beige desk notebook
+  stampTwoTone(laptopProto, "tech", "accentBlue", ld.cx + 0.06, ld.height, ld.cz + 0.16, Math.PI * 0.48, "detail");
   const pad = bevelPad(0.22, 0.012, 0.28, 0.008, 0.003, 4);
   transformGeometry(pad, ld.cx + 0.14, ld.height, ld.cz - 0.30, 0.12);
-  kit.geo("clay", pad, "detail", 34);
+  kit.geo("accentBlue", pad, "detail", 34);
 
   const leftDeskChairs = [
     { id: "left-desk-chair-w1", x: ld.cx - 0.72, z: ld.cz + 0.48, yaw: Math.PI * 0.44 },
@@ -436,7 +459,7 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     { id: "left-desk-chair-e1", x: ld.cx + 0.74, z: ld.cz + 0.24, yaw: -Math.PI * 0.56 },
   ];
   for (const ch of leftDeskChairs) {
-    kit.stamp("clay", swivelChairProto, ch.x, 0, ch.z, ch.yaw, "furniture");
+    stampTwoTone(swivelChairProto, "chair", "chairBase", ch.x, 0, ch.z, ch.yaw, "furniture");
     kit.contactShadow(ch.x, 0.002, ch.z, 0.60, 0.60, 0.12);
     collisionWorld.addCollider(ch.id, ch.x - 0.28, 0, ch.z - 0.28, ch.x + 0.28, 0.98, ch.z + 0.28);
   }
@@ -452,31 +475,32 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
 
     addCredenza(kit, collisionWorld, "left-credenza", x0, 0, z1, x1, h, z0, "+z", 3);
 
-    // Two floating wall shelves above credenza
     const shelfX0 = x0 + 0.06;
     const shelfX1 = x1 - 0.06;
     const shelfZ1 = z1;
     const shelfZ0 = z1 + 0.34;
     for (const sy of [alc.shelfY1, alc.shelfY2]) {
-      kit.box("clay", shelfX0, sy, shelfZ1, shelfX1, sy + 0.032, shelfZ0, "furniture");
+      kit.box("desk", shelfX0, sy, shelfZ1, shelfX1, sy + 0.032, shelfZ0, "furniture");
     }
 
-    // Lower shelf: row of 5 upright books + 1 leaning book on left, 3 horizontal stacked books on right
+    // Lower shelf: row of 5 upright books + 1 leaning book with tasteful blue, beige, warm gray & gold accents
     const bookY = alc.shelfY1 + 0.032;
+    const uprightMats: MaterialKind[] = ["accentBlue", "accentBeige", "desk", "chair", "accentGold"];
     for (let b = 0; b < 5; b++) {
       const bx = shelfX0 + 0.14 + b * 0.042;
       const bh = 0.23 + (b % 3) * 0.022;
-      kit.box("clay", bx, bookY, shelfZ1 + 0.05, bx + 0.034, bookY + bh, shelfZ1 + 0.25, "detail");
+      kit.box(uprightMats[b], bx, bookY, shelfZ1 + 0.05, bx + 0.034, bookY + bh, shelfZ1 + 0.25, "detail");
     }
     const leanBook = bevelPad(0.034, 0.24, 0.2, 0.004, 0.002, 3);
     leanBook.rotateZ(-0.28);
     transformGeometry(leanBook, shelfX0 + 0.4, bookY + 0.01, shelfZ1 + 0.15);
-    kit.geo("clay", leanBook, "detail", 34);
+    kit.geo("accentBlue", leanBook, "detail", 34);
 
+    const stackMats: MaterialKind[] = ["accentBeige", "desk", "accentBlue"];
     for (let s = 0; s < 3; s++) {
       const w = 0.26 - s * 0.025;
       kit.box(
-        "clay",
+        stackMats[s],
         shelfX1 - 0.42 + s * 0.012,
         bookY + s * 0.034,
         shelfZ1 + 0.07,
@@ -487,38 +511,36 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
       );
     }
 
-    // Upper shelf: two blank recessed architectural art frames (strictly zero text/logos!)
+    // Upper shelf: two blank architectural art frames (zero text/logos!)
     const topShelfY = alc.shelfY2 + 0.032;
-    const addBlankFrame = (fx: number, fz: number, fw: number, fh: number) => {
+    const addBlankFrame = (fx: number, fz: number, fw: number, fh: number, matColor: MaterialKind) => {
       const outer = bevelPad(fw, fh, 0.026, 0.006, 0.003, 4);
-      outer.translate(0, 0, 0);
       outer.rotateX(-0.11);
       transformGeometry(outer, fx, topShelfY, fz);
-      kit.geo("clay", outer, "detail", 34);
+      kit.geo("desk", outer, "detail", 34);
 
       const matBoard = bevelPad(fw - 0.056, fh - 0.056, 0.01, 0.004, 0.002, 3);
       matBoard.translate(0, 0.028, 0.012);
       matBoard.rotateX(-0.11);
       transformGeometry(matBoard, fx, topShelfY, fz);
-      kit.geo("clay", matBoard, "detail", 34);
+      kit.geo(matColor, matBoard, "detail", 34);
     };
-    addBlankFrame(shelfX1 - 0.56, shelfZ1 + 0.11, 0.28, 0.34);
-    addBlankFrame(shelfX1 - 0.28, shelfZ1 + 0.15, 0.24, 0.27);
+    addBlankFrame(shelfX1 - 0.56, shelfZ1 + 0.11, 0.28, 0.34, "accentBeige");
+    addBlankFrame(shelfX1 - 0.28, shelfZ1 + 0.15, 0.24, 0.27, "clay");
   }
 
-  // ---- 3. Center-Back Lounge Seating Group (2 Sculpted Lounge Armchairs + Round Side Table) ----
+  // ---- 3. Center-Back Lounge Seating Group (2 Muted Blue Armchairs + Round Side Table) ----
   {
     const { leftChair, rightChair, sideTable } = furniture.lounge;
     for (const [id, ch] of [
       ["lounge-chair-left", leftChair],
       ["lounge-chair-right", rightChair],
     ] as const) {
-      kit.stamp("clay", loungeChairProto, ch.x, 0, ch.z, ch.yaw, "furniture");
+      stampTwoTone(loungeChairProto, "sofa", "chairBase", ch.x, 0, ch.z, ch.yaw, "furniture");
       kit.contactShadow(ch.x, 0.002, ch.z, 0.86, 0.82, 0.13);
       collisionWorld.addCollider(id, ch.x - 0.42, 0, ch.z - 0.4, ch.x + 0.42, 0.86, ch.z + 0.4);
     }
 
-    // Refined round modern side table with chamfered Lathe top profile + 3 splayed tapered legs
     const r = sideTable.radius;
     const topPts = [
       new THREE.Vector2(0.0, 0.0),
@@ -530,12 +552,11 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     ];
     const top = new THREE.LatheGeometry(topPts, 28);
     transformGeometry(top, sideTable.x, sideTable.height - 0.032, sideTable.z);
-    kit.geo("clay", top, "furniture", 38);
+    kit.geo("desk", top, "furniture", 38);
 
-    // Subtle recessed under-top hub ring
     const underHub = new THREE.CylinderGeometry(r * 0.46, r * 0.46, 0.02, 20);
     transformGeometry(underHub, sideTable.x, sideTable.height - 0.042, sideTable.z);
-    kit.geo("clay", underHub, "detail", 40);
+    kit.geo("chairBase", underHub, "detail", 40);
 
     for (let i = 0; i < 3; i++) {
       const ang = (i * Math.PI * 2) / 3 + 0.3;
@@ -544,7 +565,7 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
       leg.translate(r * 0.48, (sideTable.height - 0.03) / 2, 0);
       leg.rotateY(ang);
       transformGeometry(leg, sideTable.x, 0, sideTable.z);
-      kit.geo("clay", leg, "detail", 44);
+      kit.geo("chairBase", leg, "detail", 44);
     }
     kit.contactShadow(sideTable.x, 0.002, sideTable.z, r * 2.1, r * 2.1, 0.12);
     collisionWorld.addCollider(
@@ -558,7 +579,7 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     );
   }
 
-  // ---- 4. Center-Right Meeting Table, 2 Curved-Shell Chairs, Modern 2-Seater Loveseat & 2 Laptops ----
+  // ---- 4. Center-Right Meeting Table, 2 Slate Chairs, Muted Blue Loveseat & 2 Graphite Laptops ----
   {
     const mt = furniture.meeting;
     addWorkDesk(
@@ -573,20 +594,27 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
       mt.height,
       false,
     );
-    // Two properly hinged open 3D laptops on meeting table
-    kit.stamp("clay", laptopProto, mt.cx - 0.04, mt.height, mt.cz + 0.32, -Math.PI * 0.52, "detail");
-    kit.stamp("clay", laptopProto, mt.cx + 0.05, mt.height, mt.cz - 0.32, Math.PI * 0.46, "detail");
+    stampTwoTone(laptopProto, "tech", "accentBlue", mt.cx - 0.04, mt.height, mt.cz + 0.32, -Math.PI * 0.52, "detail");
+    stampTwoTone(laptopProto, "tech", "accentBlue", mt.cx + 0.05, mt.height, mt.cz - 0.32, Math.PI * 0.46, "detail");
 
-    // Two sculpted 4-leg curved-shell side chairs on West (-X) side facing +X
     for (const [idx, dz] of [0.42, -0.42].entries()) {
       const cx = mt.cx - mt.widthX / 2 - 0.26;
       const cz = mt.cz + dz;
-      kit.stamp("clay", meetingChairProto, cx, 0, cz, Math.PI * 0.48 + (idx === 0 ? 0.06 : -0.05), "furniture");
+      stampTwoTone(
+        meetingChairProto,
+        "chair",
+        "chairBase",
+        cx,
+        0,
+        cz,
+        Math.PI * 0.48 + (idx === 0 ? 0.06 : -0.05),
+        "furniture",
+      );
       kit.contactShadow(cx, 0.002, cz, 0.50, 0.50, 0.12);
       collisionWorld.addCollider(`meeting-chair-${idx}`, cx - 0.24, 0, cz - 0.24, cx + 0.24, 0.88, cz + 0.24);
     }
 
-    // Refined 2-Seater Modern Architectural Loveseat Sofa on East (+X) side facing -X
+    // Refined 2-Seater Modern Architectural Loveseat Sofa in muted blue upholstery + charcoal legs
     const bx = mt.benchX;
     const bz = mt.cz;
     const benchLen = 1.66;
@@ -597,41 +625,36 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
         leg.rotateZ(sx * 0.08);
         leg.rotateX(-sz * 0.06);
         transformGeometry(leg, bx + sx * (benchD / 2 - 0.085), 0.085, bz + sz * (benchLen / 2 - 0.10));
-        kit.geo("clay", leg, "detail", 44);
+        kit.geo("chairBase", leg, "detail", 44);
       }
     }
 
-    // Sculpted base deck
     const benchDeck = bevelPad(benchD, 0.125, benchLen, 0.045, 0.018, 5);
     transformGeometry(benchDeck, bx, 0.165, bz);
-    kit.geo("clay", benchDeck, "furniture", 38);
+    kit.geo("sofa", benchDeck, "furniture", 38);
 
-    // Two plump beveled seat cushions
     for (const sz of [-0.385, 0.385]) {
       const cushion = bevelPad(benchD - 0.16, 0.125, 0.74, 0.05, 0.022, 6);
       transformGeometry(cushion, bx - 0.055, 0.285, bz + sz);
-      kit.geo("clay", cushion, "furniture", 40);
+      kit.geo("sofa", cushion, "furniture", 40);
     }
 
-    // Gently angled full-length outer backrest shell
     const backShell = bevelPad(0.12, 0.49, benchLen, 0.045, 0.018, 5);
     backShell.rotateZ(-0.12);
     transformGeometry(backShell, bx + benchD / 2 - 0.085, 0.28, bz);
-    kit.geo("clay", backShell, "furniture", 40);
+    kit.geo("sofa", backShell, "furniture", 40);
 
-    // Two plush angled back cushions
     for (const sz of [-0.385, 0.385]) {
       const backPillow = bevelPad(0.115, 0.36, 0.73, 0.05, 0.022, 6);
       backPillow.rotateZ(-0.17);
       transformGeometry(backPillow, bx + benchD / 2 - 0.165, 0.39, bz + sz);
-      kit.geo("clay", backPillow, "furniture", 42);
+      kit.geo("sofa", backPillow, "furniture", 42);
     }
 
-    // Sculpted slim curved end arms
     for (const sz of [-1, 1] as const) {
       const arm = bevelPad(benchD - 0.04, 0.29, 0.092, 0.036, 0.016, 5);
       transformGeometry(arm, bx, 0.28, bz + sz * (benchLen / 2 - 0.048));
-      kit.geo("clay", arm, "furniture", 38);
+      kit.geo("sofa", arm, "furniture", 38);
     }
 
     kit.contactShadow(bx, 0.002, bz, benchD + 0.14, benchLen + 0.14, 0.14);
@@ -646,7 +669,7 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     );
   }
 
-  // ---- 5. Right Shelving Alcove Cube, Floating Shelves & Ceramic Vessels ----
+  // ---- 5. Right Shelving Alcove Cube, Floating Shelves & Ceramic/Gold Vessels ----
   {
     const rc = furniture.rightNicheCube;
     const x0 = rc.cx - rc.widthX / 2;
@@ -656,21 +679,20 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     const cubeSolid = new RectSolid();
     cubeSolid.add(x0 + 0.015, rc.y0, z1 + 0.015, x1 - 0.015, rc.y0 + 0.03, z0 - 0.015);
     cubeSolid.add(x0, rc.y0 + 0.03, z1, x1, rc.y0 + rc.height, z0);
-    kit.solid("clay", cubeSolid, "furniture", (_x0, ey0, _z0, _x1, ey1) => !(ey0 <= rc.y0 + 0.001 && ey1 <= rc.y0 + 0.001));
+    kit.solid("desk", cubeSolid, "furniture");
     kit.segment("detail", x0, rc.y0 + rc.height - 0.06, z0 + 0.002, x0, rc.y0 + rc.height - 0.06, z1 - 0.002);
     kit.segment("detail", x0, rc.y0 + rc.height - 0.06, z0 + 0.002, x1, rc.y0 + rc.height - 0.06, z0 + 0.002);
     kit.contactShadow(rc.cx, rc.y0 + 0.002, rc.cz, rc.widthX + 0.10, rc.depthZ + 0.10, 0.12);
 
-    // Two floating shelves mounted on right niche wall (X = rightWing.nicheWallX0)
     const sx1 = rightWing.nicheWallX0;
     const sx0 = sx1 - 0.34;
     const sz0 = -5.32;
     const sz1 = -7.28;
     for (const sy of [rightWing.shelfY1, rightWing.shelfY2]) {
-      kit.box("clay", sx0, sy, sz1, sx1, sy + 0.032, sz0, "furniture");
+      kit.box("desk", sx0, sy, sz1, sx1, sy + 0.032, sz0, "furniture");
     }
 
-    // Sculpted Lathe ceramic vessels on lower right shelf
+    // Sculpted Lathe ceramic vessels in beige, muted blue & soft champagne gold
     const yS1 = rightWing.shelfY1 + 0.032;
     const vase1Pts = [
       new THREE.Vector2(0.0, 0.0),
@@ -682,7 +704,7 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     ];
     const vase1 = new THREE.LatheGeometry(vase1Pts, 18);
     transformGeometry(vase1, sx0 + 0.17, yS1, -6.72);
-    kit.geo("clay", vase1, "detail", 36);
+    kit.geo("accentBeige", vase1, "detail", 36);
 
     const vase2Pts = [
       new THREE.Vector2(0.0, 0.0),
@@ -692,19 +714,18 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     ];
     const vase2 = new THREE.LatheGeometry(vase2Pts, 18);
     transformGeometry(vase2, sx0 + 0.17, yS1, -6.32);
-    kit.geo("clay", vase2, "detail", 36);
+    kit.geo("accentBlue", vase2, "detail", 36);
 
     const bowl = new THREE.CylinderGeometry(0.09, 0.055, 0.065, 18);
     transformGeometry(bowl, sx0 + 0.17, yS1 + 0.0325, -5.78);
-    kit.geo("clay", bowl, "detail", 36);
+    kit.geo("accentGold", bowl, "detail", 36);
 
-    // Minimalist horizontal book volumes on upper right shelf next to small plant
     const yS2 = rightWing.shelfY2 + 0.032;
-    kit.box("clay", sx0 + 0.06, yS2, -6.78, sx0 + 0.28, yS2 + 0.035, -6.42, "detail");
-    kit.box("clay", sx0 + 0.08, yS2 + 0.035, -6.74, sx0 + 0.26, yS2 + 0.068, -6.46, "detail");
+    kit.box("accentBeige", sx0 + 0.06, yS2, -6.78, sx0 + 0.28, yS2 + 0.035, -6.42, "detail");
+    kit.box("accentBlue", sx0 + 0.08, yS2 + 0.035, -6.74, sx0 + 0.26, yS2 + 0.068, -6.46, "detail");
   }
 
-  // ---- 6. Upper-Right Mezzanine Desks, Swivel Chairs & Refined Low Credenza (walkable at Y = 3.48 m!) ----
+  // ---- 6. Upper-Right Mezzanine Desks, Slate Swivel Chairs & Credenza ----
   for (const [idx, ud] of furniture.upperDesks.entries()) {
     addWorkDesk(
       kit,
@@ -718,9 +739,9 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
       0.74,
       true,
     );
-    kit.stamp("clay", laptopProto, ud.cx - 0.05, ud.y0 + 0.74, ud.cz, Math.PI * 0.5, "detail");
+    stampTwoTone(laptopProto, "tech", "accentBlue", ud.cx - 0.05, ud.y0 + 0.74, ud.cz, Math.PI * 0.5, "detail");
     const chX = ud.cx + ud.chairSide * 0.52;
-    kit.stamp("clay", swivelChairProto, chX, ud.y0, ud.cz, -Math.PI * 0.5, "furniture");
+    stampTwoTone(swivelChairProto, "chair", "chairBase", chX, ud.y0, ud.cz, -Math.PI * 0.5, "furniture");
     kit.contactShadow(chX, ud.y0 + 0.002, ud.cz, 0.58, 0.58, 0.11);
     collisionWorld.addCollider(
       `upper-right-chair-${idx}`,
@@ -733,7 +754,6 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     );
   }
 
-  // Refined architectural low storage credenza visible cleanly through upper-right glass partition
   addCredenza(
     kit,
     collisionWorld,
@@ -748,11 +768,11 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     2,
   );
 
-  // ---- 7. Upper-Left Enclosed Office Interior Desk & Swivel Chair (for complete 360° Orbit inspection) ----
+  // ---- 7. Upper-Left Enclosed Office Interior Desk & Slate Swivel Chair ----
   {
     const uy = envelope.upperFloorY;
     addWorkDesk(kit, collisionWorld, "upper-left-office-desk", -4.15, uy, -12.15, 0.76, 1.38, 0.74, false);
-    kit.stamp("clay", laptopProto, -4.15, uy + 0.74, -12.15, Math.PI * 0.5, "detail");
-    kit.stamp("clay", swivelChairProto, -3.55, uy, -12.15, -Math.PI * 0.5, "furniture");
+    stampTwoTone(laptopProto, "tech", "accentBlue", -4.15, uy + 0.74, -12.15, Math.PI * 0.5, "detail");
+    stampTwoTone(swivelChairProto, "chair", "chairBase", -3.55, uy, -12.15, -Math.PI * 0.5, "furniture");
   }
 }

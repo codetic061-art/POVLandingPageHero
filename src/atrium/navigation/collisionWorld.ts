@@ -27,8 +27,8 @@ export interface ResolvedStep {
 }
 
 /**
- * Multi-elevation 3D collision & walkable-surface solver adapted from
- * apartment-3d-plan/js/walk.js and extended for staircases and mezzanines.
+ * Multi-elevation 3D collision & walkable-surface solver with jam-proof
+ * wall/furniture sliding and escape resolution for staircases and mezzanines.
  */
 export class CollisionWorld {
   private readonly staticColliders: Collider3D[] = [];
@@ -94,6 +94,12 @@ export class CollisionWorld {
     return this.surfaces.length;
   }
 
+  private getAllColliders(): readonly Collider3D[] {
+    return this.dynamicColliders.length > 0
+      ? [...this.staticColliders, ...this.dynamicColliders]
+      : this.staticColliders;
+  }
+
   /**
    * Finds the walkable surface at (x, z) closest to refFeetY within step tolerance.
    */
@@ -116,17 +122,35 @@ export class CollisionWorld {
     return best ? { feetY: best.feetY, id: best.id } : null;
   }
 
+  private maxPenetration(x: number, z: number, feetY: number, r: number): number {
+    const bodyBottom = feetY + 0.24;
+    const bodyTop = feetY + 1.72;
+    const all = this.getAllColliders();
+    let maxPen = 0;
+    for (const b of all) {
+      if (b.y1 <= bodyBottom || b.y0 >= bodyTop) continue;
+      const cx = Math.max(b.x0, Math.min(x, b.x1));
+      const cz = Math.max(b.z0, Math.min(z, b.z1));
+      const dx = x - cx;
+      const dz = z - cz;
+      const distSq = dx * dx + dz * dz;
+      if (distSq < r * r) {
+        const pen = r - Math.sqrt(distSq);
+        if (pen > maxPen) maxPen = pen;
+      }
+    }
+    return maxPen;
+  }
+
   private pushOut(x: number, z: number, feetY: number, r: number): [number, number] {
     let px = x;
     let pz = z;
     const bodyBottom = feetY + 0.24;
     const bodyTop = feetY + 1.72;
-    const all =
-      this.dynamicColliders.length > 0
-        ? [...this.staticColliders, ...this.dynamicColliders]
-        : this.staticColliders;
+    const all = this.getAllColliders();
 
-    for (let iter = 0; iter < 3; iter++) {
+    for (let iter = 0; iter < 6; iter++) {
+      let moved = false;
       for (const b of all) {
         if (b.y1 <= bodyBottom || b.y0 >= bodyTop) continue;
         const cx = Math.max(b.x0, Math.min(px, b.x1));
@@ -135,9 +159,10 @@ export class CollisionWorld {
         const dz = pz - cz;
         const distSq = dx * dx + dz * dz;
         if (distSq < r * r) {
+          moved = true;
           if (distSq > 1e-8) {
             const dist = Math.sqrt(distSq);
-            const push = r - dist;
+            const push = r - dist + 1e-4;
             px += (dx / dist) * push;
             pz += (dz / dist) * push;
           } else {
@@ -146,34 +171,34 @@ export class CollisionWorld {
             const dT = pz - b.z0;
             const dB = b.z1 - pz;
             const m = Math.min(dL, dR, dT, dB);
-            if (m === dL) px = b.x0 - r;
-            else if (m === dR) px = b.x1 + r;
-            else if (m === dT) pz = b.z0 - r;
-            else pz = b.z1 + r;
+            if (m === dL) px = b.x0 - r - 1e-4;
+            else if (m === dR) px = b.x1 + r + 1e-4;
+            else if (m === dT) pz = b.z0 - r - 1e-4;
+            else pz = b.z1 + r + 1e-4;
           }
         }
       }
+      if (!moved) break;
     }
     return [px, pz];
   }
 
-  private isCircleClear(x: number, z: number, feetY: number, r: number): boolean {
-    const bodyBottom = feetY + 0.24;
-    const bodyTop = feetY + 1.72;
-    const all =
-      this.dynamicColliders.length > 0
-        ? [...this.staticColliders, ...this.dynamicColliders]
-        : this.staticColliders;
-    const tolSq = (r - 1e-3) * (r - 1e-3);
-    for (const b of all) {
-      if (b.y1 <= bodyBottom || b.y0 >= bodyTop) continue;
-      const cx = Math.max(b.x0, Math.min(x, b.x1));
-      const cz = Math.max(b.z0, Math.min(z, b.z1));
-      const dx = x - cx;
-      const dz = z - cz;
-      if (dx * dx + dz * dz < tolSq) return false;
+  private tryCandidate(
+    candX: number,
+    candZ: number,
+    currFeetY: number,
+    currPen: number,
+    radius: number,
+  ): { x: number; z: number; feetY: number; id: string; pen: number } | null {
+    const [nx, nz] = this.pushOut(candX, candZ, currFeetY, radius);
+    const surf = this.findSurface(nx, nz, currFeetY);
+    if (!surf) return null;
+    const pen = this.maxPenetration(nx, nz, surf.feetY, radius);
+    // Accept if clear OR strictly escaping an overlapping tight corner
+    if (pen <= 0.0025 || pen < currPen - 1e-4) {
+      return { x: nx, z: nz, feetY: surf.feetY, id: surf.id, pen };
     }
-    return true;
+    return null;
   }
 
   resolveMove(
@@ -185,7 +210,7 @@ export class CollisionWorld {
     radius = ATRIUM_CONFIG.navigation.firstPerson.playerRadius,
   ): ResolvedStep {
     const dist = Math.hypot(targetX - prevX, targetZ - prevZ);
-    const steps = Math.max(1, Math.ceil(dist / 0.04));
+    const steps = Math.max(1, Math.ceil(dist / 0.035));
     let cx = prevX;
     let cz = prevZ;
     let cy = prevFeetY;
@@ -195,24 +220,38 @@ export class CollisionWorld {
     const stepZ = (targetZ - prevZ) / steps;
 
     for (let i = 0; i < steps; i++) {
-      // X sub-step
-      const [nxX, nzX] = this.pushOut(cx + stepX, cz, cy, radius);
-      const surfX = this.findSurface(nxX, nzX, cy);
-      if (surfX && this.isCircleClear(nxX, nzX, surfX.feetY, radius)) {
-        cx = nxX;
-        cz = nzX;
-        cy = surfX.feetY;
-        surfaceId = surfX.id;
+      const currPen = this.maxPenetration(cx, cz, cy, radius);
+
+      // 1. Try full diagonal sub-step first for smooth gliding along obstacles
+      const diag = this.tryCandidate(cx + stepX, cz + stepZ, cy, currPen, radius);
+      if (diag) {
+        cx = diag.x;
+        cz = diag.z;
+        cy = diag.feetY;
+        surfaceId = diag.id;
+        continue;
       }
 
-      // Z sub-step
-      const [nxZ, nzZ] = this.pushOut(cx, cz + stepZ, cy, radius);
-      const surfZ = this.findSurface(nxZ, nzZ, cy);
-      if (surfZ && this.isCircleClear(nxZ, nzZ, surfZ.feetY, radius)) {
-        cx = nxZ;
-        cz = nzZ;
-        cy = surfZ.feetY;
-        surfaceId = surfZ.id;
+      // 2. Fall back to independent X and Z axis sliding so corners never lock movement
+      if (Math.abs(stepX) > 1e-6) {
+        const slideX = this.tryCandidate(cx + stepX, cz, cy, currPen, radius);
+        if (slideX) {
+          cx = slideX.x;
+          cz = slideX.z;
+          cy = slideX.feetY;
+          surfaceId = slideX.id;
+        }
+      }
+
+      if (Math.abs(stepZ) > 1e-6) {
+        const penAfterX = this.maxPenetration(cx, cz, cy, radius);
+        const slideZ = this.tryCandidate(cx, cz + stepZ, cy, penAfterX, radius);
+        if (slideZ) {
+          cx = slideZ.x;
+          cz = slideZ.z;
+          cy = slideZ.feetY;
+          surfaceId = slideZ.id;
+        }
       }
     }
 

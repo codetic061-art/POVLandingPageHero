@@ -19,6 +19,7 @@ export interface EntranceDoorController {
 
 export interface BuiltArchitecture {
   shellGeometry: THREE.BufferGeometry;
+  shellFloorGeometry: THREE.BufferGeometry;
   shellEdges: number[];
   doors: EntranceDoorController;
 }
@@ -275,10 +276,11 @@ export function buildArchitecture(
     rightWing.nicheZ0,
   );
 
-  // Exclude buried underside edges of the foundation slab at Y = -slabT so no underground lines ever appear
-  const builtShell = solid.build((_x0, y0, _z0, _x1, y1, _z1) => {
-    return !(y0 <= -slabT + 0.002 && y1 <= -slabT + 0.002);
-  });
+  // Exclude buried underside edges of the foundation slab at Y = -slabT and split walkable floor tops into warm gray
+  const builtShell = solid.build(
+    (_x0, y0, _z0, _x1, y1, _z1) => !(y0 <= -slabT + 0.002 && y1 <= -slabT + 0.002),
+    [0, rightWing.plinthY, envelope.upperFloorY],
+  );
 
   // ---- Stepped Entrance Portal Casing / Architrave (watertight RectSolid, zero corner overlap seams!) ----
   const cw0 = entrance.halfClearWidth;
@@ -306,8 +308,8 @@ export function buildArchitecture(
   casingSolid.add(-cw0, ch0 - 0.022, 0.04, cw0, ch0, extT - 0.07);
   kit.solid("clay", casingSolid, "structure", (_x0, y0, _z0, _x1, y1) => !(y0 <= 0.001 && y1 <= 0.001));
 
-  // Subtle low architectural threshold bar (flush clean outline)
-  kit.box("clay", -cw0, 0, 0.0, cw0, 0.012, extT, "detail");
+  // Subtle low architectural threshold bar matching warm-gray floor
+  kit.box("floor", -cw0, 0, 0.0, cw0, 0.012, extT, "detail");
 
   // Upper-left office doorway casing & recessed white clay door panel (watertight RectSolid)
   const upperDoorFrame = new RectSolid();
@@ -447,7 +449,7 @@ export function buildArchitecture(
     kit.geo("clay", bezel, "detail", 30);
     const core = new THREE.CylinderGeometry(0.054, 0.054, 0.016, 18);
     transformGeometry(core, lx, ly - 0.007, lz);
-    kit.geo("clay", core, "detail", 30);
+    kit.geo("accentGold", core, "detail", 30);
   };
   for (const lz of leftWing.downlightZs) addDownlight(leftWing.downlightX, envelope.groundSoffitY, lz);
   for (const lz of rightWing.downlightZs) addDownlight(rightWing.downlightX, envelope.groundSoffitY, lz);
@@ -640,6 +642,7 @@ export function buildArchitecture(
 
   return {
     shellGeometry: builtShell.geometry,
+    shellFloorGeometry: builtShell.floorGeometry,
     shellEdges: builtShell.edges,
     doors: {
       group: doorsGroup,
