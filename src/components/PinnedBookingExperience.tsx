@@ -489,36 +489,62 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
             Back to selection
           </button>
           <div className="atrium-mode-toolbar" role="toolbar" aria-label="3D viewing modes">
-            <button
-              type="button"
-              className="atrium-mode-btn"
-              aria-pressed={viewMode === "orbit"}
-              disabled={!entryReady}
-              onClick={() => sceneRef.current?.setMode("orbit")}
-            >
-              3D Orbit
-            </button>
-            <button
-              type="button"
-              className="atrium-mode-btn"
-              aria-pressed={viewMode === "firstPerson"}
-              disabled={!entryReady}
-              onClick={() => sceneRef.current?.setMode("firstPerson")}
-            >
-              First Person
-            </button>
-            <button
-              type="button"
-              className="atrium-reset-btn"
-              disabled={!entryReady}
-              onClick={() => sceneRef.current?.resetView()}
-            >
-              Reset view
-            </button>
+            {viewMode === "meeting" ? (
+              <>
+                <button
+                  type="button"
+                  className="atrium-mode-btn"
+                  aria-pressed={true}
+                  disabled={!entryReady}
+                  onClick={() => sceneRef.current?.exitMeetingRoom(false)}
+                >
+                  Leave Meeting
+                </button>
+                <button
+                  type="button"
+                  className="atrium-reset-btn"
+                  disabled={!entryReady}
+                  onClick={() => sceneRef.current?.resetView()}
+                >
+                  Center view
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="atrium-mode-btn"
+                  aria-pressed={viewMode === "orbit"}
+                  disabled={!entryReady}
+                  onClick={() => sceneRef.current?.setMode("orbit")}
+                >
+                  3D Orbit
+                </button>
+                <button
+                  type="button"
+                  className="atrium-mode-btn"
+                  aria-pressed={viewMode === "firstPerson"}
+                  disabled={!entryReady}
+                  onClick={() => sceneRef.current?.setMode("firstPerson")}
+                >
+                  First Person
+                </button>
+                <button
+                  type="button"
+                  className="atrium-reset-btn"
+                  disabled={!entryReady}
+                  onClick={() => sceneRef.current?.resetView()}
+                >
+                  Reset view
+                </button>
+              </>
+            )}
           </div>
           <p className="entrance-hint">
             {!entryReady ? (
               "Preparing 3D atrium…"
+            ) : viewMode === "meeting" ? (
+              "Seated Meeting · Move mouse left / right to look · Press E or Esc to leave"
             ) : viewMode === "orbit" ? (
               "360° Orbit · Drag to rotate · Scroll to zoom"
             ) : (

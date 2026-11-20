@@ -1,4 +1,4 @@
-export type AtriumViewMode = "orbit" | "firstPerson";
+export type AtriumViewMode = "orbit" | "firstPerson" | "meeting";
 
 export interface PlantSpec {
   id: string;
@@ -331,6 +331,7 @@ export const ATRIUM_CONFIG = {
       {
         id: "chair-left-desk",
         kind: "chair" as const,
+        triggerMode: "hold" as const,
         title: "Have a seat",
         subtitle: "Hold E to sit",
         activeLabel: "Seated at workstation · Press E or Esc to stand",
@@ -346,6 +347,7 @@ export const ATRIUM_CONFIG = {
       {
         id: "chair-lounge-left",
         kind: "chair" as const,
+        triggerMode: "hold" as const,
         title: "Have a seat",
         subtitle: "Hold E to sit",
         activeLabel: "Seated in lounge · Press E or Esc to stand",
@@ -361,6 +363,7 @@ export const ATRIUM_CONFIG = {
       {
         id: "desk-left-workstation",
         kind: "desk" as const,
+        triggerMode: "hold" as const,
         title: "Workstation",
         subtitle: "Hold E to focus",
         activeLabel: "Workstation view · Press E or Esc to exit",
@@ -376,6 +379,7 @@ export const ATRIUM_CONFIG = {
       {
         id: "desk-right-meeting",
         kind: "desk" as const,
+        triggerMode: "hold" as const,
         title: "Meeting desk",
         subtitle: "Hold E to focus",
         activeLabel: "Meeting desk view · Press E or Esc to exit",
@@ -388,7 +392,34 @@ export const ATRIUM_CONFIG = {
           pitch: -0.38,
         },
       },
+      {
+        id: "door-meeting-room",
+        kind: "door" as const,
+        triggerMode: "press" as const,
+        title: "Press E to Enter Meeting Room",
+        subtitle: "Upper Floor · Virtual Conference Room",
+        activeLabel: "Virtual Meeting Room · Press E or Esc to leave",
+        anchor: [3.05, 4.92, -13.06] as const,
+        proximityCenter: [3.05, 3.48, -12.35] as const,
+        radius: 2.45,
+        pose: {
+          position: [3.05, 5.08, -11.65] as const,
+          yaw: 0,
+          pitch: -0.02,
+        },
+      },
     ],
+  },
+
+  meetingRoom: {
+    initialParticipants: 5,
+    returnSpawn: {
+      x: 3.05,
+      z: -11.65,
+      feetY: 3.48,
+      yaw: 0,
+      pitch: -0.02,
+    },
   },
 
   navigation: {

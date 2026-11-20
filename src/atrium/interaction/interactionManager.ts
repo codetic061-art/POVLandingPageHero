@@ -7,7 +7,7 @@ export type InteractionTargetConfig = (typeof ATRIUM_CONFIG.interactions.targets
 export interface InteractionSnapshot {
   nearestTargetId: string | null;
   activeTargetId: string | null;
-  activeKind: "chair" | "desk" | null;
+  activeKind: "chair" | "desk" | "door" | null;
   holdProgress: number;
   promptVisible: boolean;
 }
@@ -16,14 +16,15 @@ const RING_RADIUS = 16;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
 /**
- * Manages proximity detection, 1-second Hold-E circular progress ring,
- * 3D-projected floating Glassmorphism prompt, and smooth seated/desk-focus
- * camera transitions strictly for the 4 selected interactive objects.
+ * Manages proximity detection, 1-second Hold-E circular progress ring (for selected
+ * chairs/desks), instant Press-E entry for the upper-floor Meeting Room door,
+ * and 3D-projected floating Glassmorphism prompt.
  */
 export class AtriumInteractionManager {
   private readonly host: HTMLDivElement;
   private readonly camera: THREE.PerspectiveCamera;
   private readonly fpController: FirstPersonController;
+  private readonly onEnterMeetingRoom?: () => void;
   private readonly targets = ATRIUM_CONFIG.interactions.targets;
   private readonly holdDuration = ATRIUM_CONFIG.interactions.holdDurationSec;
   private readonly transitionDuration = ATRIUM_CONFIG.interactions.transitionDurationSec;
@@ -52,10 +53,12 @@ export class AtriumInteractionManager {
     host: HTMLDivElement,
     camera: THREE.PerspectiveCamera,
     fpController: FirstPersonController,
+    onEnterMeetingRoom?: () => void,
   ) {
     this.host = host;
     this.camera = camera;
     this.fpController = fpController;
+    this.onEnterMeetingRoom = onEnterMeetingRoom;
 
     // 1. Floating 3D-projected Glassmorphism prompt
     this.promptEl = document.createElement("div");
@@ -150,6 +153,10 @@ export class AtriumInteractionManager {
       return;
     }
     if (this.nearestTarget) {
+      if (this.nearestTarget.triggerMode === "press") {
+        this.activateTarget(this.nearestTarget);
+        return;
+      }
       this.holdingE = true;
     }
   }
@@ -313,7 +320,6 @@ export class AtriumInteractionManager {
   }
 
   private activateTarget(target: InteractionTargetConfig): void {
-    this.activeTarget = target;
     this.holdingE = false;
     this.waitReleaseAfterActivate = true;
     this.holdProgress = 0;
@@ -321,6 +327,13 @@ export class AtriumInteractionManager {
     this.syncRingUI();
     this.setPromptVisible(false);
 
+    if (target.kind === "door") {
+      this.nearestTarget = null;
+      this.onEnterMeetingRoom?.();
+      return;
+    }
+
+    this.activeTarget = target;
     this.statusTextEl.textContent = target.activeLabel;
     this.statusPillEl.classList.add("is-visible");
     this.statusPillEl.setAttribute("aria-hidden", "false");
@@ -367,6 +380,12 @@ export class AtriumInteractionManager {
         }
         if (this.nearestTarget) {
           e.preventDefault();
+          if (this.nearestTarget.triggerMode === "press") {
+            if (!e.repeat && !this.waitReleaseAfterActivate) {
+              this.activateTarget(this.nearestTarget);
+            }
+            return;
+          }
           this.holdingE = true;
         }
       }

@@ -321,13 +321,13 @@
     align-items: center;
     gap: 10px;
     padding: 7px 14px 7px 8px;
-    border: 1px solid rgb(186 214 245 / 38%);
+    border: 1px solid rgb(186 214 245 / 44%);
     border-radius: 16px;
-    background: linear-gradient(135deg, rgb(42 60 86 / 62%), rgb(30 44 65 / 54%));
+    background: linear-gradient(135deg, rgb(32 48 72 / 78%), rgb(22 34 54 / 72%));
     box-shadow:
-      0 10px 26px rgb(20 34 56 / 20%),
-      0 0 20px rgb(86 144 232 / 22%),
-      inset 0 1px 0 rgb(255 255 255 / 24%);
+      0 10px 26px rgb(20 34 56 / 24%),
+      0 0 22px rgb(86 144 232 / 26%),
+      inset 0 1px 0 rgb(255 255 255 / 26%);
     backdrop-filter: blur(14px) saturate(135%);
     -webkit-backdrop-filter: blur(14px) saturate(135%);
     color: #f6f9fd;

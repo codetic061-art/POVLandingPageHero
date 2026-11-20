@@ -19,6 +19,16 @@ import {
   AtriumInteractionManager,
   type InteractionSnapshot,
 } from "./interaction/interactionManager";
+import {
+  StickmanMasterAssets,
+  type StickmanRigDiagnostics,
+} from "./characters/stickmanMaster";
+import { createProgrammingOfficeDemo } from "./office/programmingOfficeDemo";
+import {
+  createVirtualMeetingRoom,
+  type MeetingDiagnostics,
+  type MeetingLayoutMetrics,
+} from "./meeting/meetingRoom";
 
 export interface AtriumDiagnostics {
   renderer: "three-webgl";
@@ -28,6 +38,8 @@ export interface AtriumDiagnostics {
   orbitTarget: [number, number, number];
   firstPerson: FirstPersonState;
   interaction: InteractionSnapshot;
+  meeting: MeetingDiagnostics;
+  officeCharacters: StickmanRigDiagnostics[];
   solidMeshCount: number;
   triangleCount: number;
   colliderCount: number;
@@ -50,6 +62,18 @@ export interface AtriumSceneApi {
   stepInteraction: (dt: number, skipRender?: boolean) => InteractionSnapshot;
   exitInteraction: () => InteractionSnapshot;
   getInteractionState: () => InteractionSnapshot;
+  enterMeetingRoom: (immediate?: boolean) => MeetingDiagnostics;
+  exitMeetingRoom: (immediate?: boolean) => void;
+  setMeetingParticipantCount: (count: number) => MeetingLayoutMetrics;
+  setMeetingYaw: (yawRad: number) => MeetingDiagnostics;
+  steerMeetingCursor: (nx: number, ny?: number) => MeetingDiagnostics;
+  stepMeeting: (dt: number, skipRender?: boolean) => MeetingDiagnostics;
+  getMeetingDiagnostics: () => MeetingDiagnostics;
+  getCharacterDiagnostics: () => {
+    office: StickmanRigDiagnostics[];
+    meeting: StickmanRigDiagnostics[];
+  };
+  setCharacterHeadVisible: (characterId: string, visible: boolean) => boolean;
   getDiagnostics: () => AtriumDiagnostics;
   resize: () => void;
   dispose: () => void;
@@ -273,7 +297,12 @@ export function createAtriumScene({
     scene.add(pl);
   }
 
-  // ---- OrbitControls, FirstPersonController & Selected-Object Interaction Manager ----
+  // ---- Shared Reusable Master 3D Stickmen, Lower-Floor Demo & Upper-Floor Virtual Meeting Room ----
+  const stickmanMaster = new StickmanMasterAssets();
+  const programmingDemo = createProgrammingOfficeDemo(stickmanMaster);
+  atriumRoot.add(programmingDemo.group);
+
+  // ---- OrbitControls, FirstPersonController, Virtual Meeting Room & Interaction Manager ----
   const orbitControls = new OrbitControls(camera, canvas);
   orbitControls.enableDamping = true;
   orbitControls.dampingFactor = navigation.orbit.dampingFactor;
@@ -283,7 +312,20 @@ export function createAtriumScene({
   orbitControls.screenSpacePanning = true;
 
   const fpController = new FirstPersonController(camera, canvas, collisionWorld);
-  const interactionManager = new AtriumInteractionManager(host, camera, fpController);
+
+  let savedMeetingReturn: {
+    x: number;
+    z: number;
+    feetY: number;
+    yaw: number;
+    pitch: number;
+  } = {
+    x: ATRIUM_CONFIG.meetingRoom.returnSpawn.x,
+    z: ATRIUM_CONFIG.meetingRoom.returnSpawn.z,
+    feetY: ATRIUM_CONFIG.meetingRoom.returnSpawn.feetY,
+    yaw: ATRIUM_CONFIG.meetingRoom.returnSpawn.yaw,
+    pitch: ATRIUM_CONFIG.meetingRoom.returnSpawn.pitch,
+  };
 
   let viewMode: AtriumViewMode = initialMode;
   let disposed = false;
@@ -291,6 +333,82 @@ export function createAtriumScene({
   let doorAnimStart = 0;
   let doorAnimDuration = 0;
   let doorAnimActive = false;
+
+  const meetingRoom = createVirtualMeetingRoom(
+    host,
+    camera,
+    canvas,
+    stickmanMaster,
+    materials,
+    () => exitMeetingRoom(false),
+  );
+  scene.add(meetingRoom.group);
+
+  const interactionManager = new AtriumInteractionManager(
+    host,
+    camera,
+    fpController,
+    () => enterMeetingRoom(false),
+  );
+
+  function enterMeetingRoom(immediate = false): MeetingDiagnostics {
+    if (disposed) return meetingRoom.getDiagnostics();
+    const curFp = fpController.getState();
+    // Remember upper-landing return position (if entered from First Person near door, return there; otherwise default outside door)
+    if (viewMode === "firstPerson" && curFp.feetY > 2.8) {
+      savedMeetingReturn = {
+        x: curFp.x,
+        z: Math.max(-12.35, curFp.z),
+        feetY: ATRIUM_CONFIG.envelope.upperFloorY,
+        yaw: curFp.yaw,
+        pitch: curFp.pitch,
+      };
+    } else {
+      savedMeetingReturn = { ...ATRIUM_CONFIG.meetingRoom.returnSpawn };
+    }
+
+    const fromPos = camera.position.clone();
+    const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
+
+    interactionManager.setEnabled(false);
+    fpController.disable();
+    orbitControls.enabled = false;
+    viewMode = "meeting";
+    meetingRoom.enter(fromPos, euler.y, euler.x, immediate || reducedMotion);
+    onModeChange?.("meeting");
+    canvas.focus({ preventScroll: true });
+    renderFrame();
+    return meetingRoom.getDiagnostics();
+  }
+
+  function exitMeetingRoom(immediate = false): void {
+    if (disposed || !meetingRoom.isActive()) return;
+    const ret = savedMeetingReturn;
+    const toPos = new THREE.Vector3(
+      ret.x,
+      ret.feetY + navigation.firstPerson.eyeHeight,
+      ret.z,
+    );
+    meetingRoom.exit(
+      toPos,
+      ret.yaw,
+      ret.pitch,
+      () => {
+        if (disposed) return;
+        viewMode = "firstPerson";
+        orbitControls.enabled = false;
+        fpController.enable();
+        fpController.spawnAt(ret.x, ret.z, ret.yaw, ret.pitch, ret.feetY);
+        interactionManager.setEnabled(true);
+        interactionManager.update(0.016);
+        onModeChange?.("firstPerson");
+        canvas.focus({ preventScroll: true });
+        renderFrame();
+      },
+      immediate || reducedMotion,
+    );
+    renderFrame();
+  }
 
   function syncDataset(): void {
     host.dataset.renderer = "three-webgl";
@@ -302,6 +420,7 @@ export function createAtriumScene({
     host.dataset.fpSurface = fp.surfaceId;
     const inter = interactionManager.getSnapshot();
     host.dataset.interactionTarget = inter.activeTargetId ?? inter.nearestTargetId ?? "";
+    host.dataset.meetingParticipants = String(meetingRoom.getParticipantCount());
   }
 
   function applyDefaultOrbitView(): void {
@@ -317,6 +436,15 @@ export function createAtriumScene({
 
   function setMode(nextMode: AtriumViewMode): void {
     if (disposed) return;
+    if (nextMode === "meeting") {
+      enterMeetingRoom(false);
+      return;
+    }
+
+    if (meetingRoom.isActive()) {
+      meetingRoom.exit(camera.position.clone(), 0, -0.02, () => {}, true);
+    }
+
     viewMode = nextMode;
     if (nextMode === "orbit") {
       interactionManager.setEnabled(false);
@@ -336,6 +464,11 @@ export function createAtriumScene({
 
   function resetView(): void {
     if (disposed) return;
+    if (viewMode === "meeting") {
+      meetingRoom.resetView();
+      renderFrame();
+      return;
+    }
     if (viewMode === "orbit") {
       applyDefaultOrbitView();
     } else {
@@ -362,6 +495,8 @@ export function createAtriumScene({
     camera.aspect = w / h;
     if (viewMode === "orbit") {
       camera.fov = camera.aspect < 0.85 ? navigation.orbit.portraitFov : navigation.orbit.defaultFov;
+    } else if (viewMode === "meeting") {
+      camera.fov = camera.aspect < 0.85 ? 68 : 54;
     } else {
       camera.fov = camera.aspect < 0.85 ? 74 : 60;
     }
@@ -377,6 +512,8 @@ export function createAtriumScene({
 
   // Bake initial soft shadow map before first frame
   arch.doors.setOpenProgress(reducedMotion ? 1 : 0);
+  programmingDemo.update(0);
+  meetingRoom.update(0, 0.016);
   renderer.shadowMap.needsUpdate = true;
   resize();
   setMode(initialMode);
@@ -403,11 +540,14 @@ export function createAtriumScene({
   }
 
   let prevTime = performance.now();
+  let animElapsedSec = 0;
+  let lastCharacterRenderTime = 0;
   const loop = (now: number) => {
     if (disposed) return;
     rafId = requestAnimationFrame(loop);
     const dt = Math.min(0.05, Math.max(0.001, (now - prevTime) / 1000));
     prevTime = now;
+    animElapsedSec += dt;
 
     let needsRender = false;
 
@@ -422,17 +562,28 @@ export function createAtriumScene({
       }
     }
 
-    if (viewMode === "orbit") {
-      orbitControls.target.y = THREE.MathUtils.clamp(orbitControls.target.y, -0.1, 6.2);
-      if (orbitControls.update()) {
+    if (viewMode === "meeting") {
+      if (meetingRoom.update(animElapsedSec, dt)) {
         needsRender = true;
       }
     } else {
-      if (fpController.step(dt)) {
+      if (!reducedMotion && now - lastCharacterRenderTime >= 33) {
+        programmingDemo.update(animElapsedSec);
+        lastCharacterRenderTime = now;
         needsRender = true;
       }
-      if (interactionManager.update(dt)) {
-        needsRender = true;
+      if (viewMode === "orbit") {
+        orbitControls.target.y = THREE.MathUtils.clamp(orbitControls.target.y, -0.1, 6.2);
+        if (orbitControls.update()) {
+          needsRender = true;
+        }
+      } else {
+        if (fpController.step(dt)) {
+          needsRender = true;
+        }
+        if (interactionManager.update(dt)) {
+          needsRender = true;
+        }
       }
     }
 
@@ -501,15 +652,55 @@ export function createAtriumScene({
       return interactionManager.getSnapshot();
     },
     getInteractionState: () => interactionManager.getSnapshot(),
+    enterMeetingRoom,
+    exitMeetingRoom,
+    setMeetingParticipantCount(count) {
+      const layout = meetingRoom.setParticipantCount(count);
+      meetingRoom.update(animElapsedSec, 0.016);
+      renderFrame();
+      return layout;
+    },
+    setMeetingYaw(yawRad) {
+      meetingRoom.setYaw(yawRad);
+      renderFrame();
+      return meetingRoom.getDiagnostics();
+    },
+    steerMeetingCursor(nx, ny = 0) {
+      meetingRoom.steerCursorNormalized(nx, ny);
+      meetingRoom.update(animElapsedSec, 0.016);
+      renderFrame();
+      return meetingRoom.getDiagnostics();
+    },
+    stepMeeting(dt, skipRender = false) {
+      animElapsedSec += dt;
+      meetingRoom.update(animElapsedSec, dt);
+      if (!skipRender) renderFrame();
+      return meetingRoom.getDiagnostics();
+    },
+    getMeetingDiagnostics: () => meetingRoom.getDiagnostics(),
+    getCharacterDiagnostics: () => ({
+      office: programmingDemo.getDiagnostics(),
+      meeting: meetingRoom.getCharacters().map((ch) => ch.getDiagnostics()),
+    }),
+    setCharacterHeadVisible(characterId, visible) {
+      const all = [...programmingDemo.characters, ...meetingRoom.getCharacters()];
+      const found = all.find((c) => c.id === characterId);
+      if (!found) return false;
+      found.setOriginalHeadVisible(visible);
+      renderFrame();
+      return true;
+    },
     getDiagnostics() {
       const usedMats = new Set<string>();
       let hasTextures = false;
-      atriumRoot.traverse((obj) => {
+      scene.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
         if (!mesh.isMesh) return;
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
         for (const m of mats) {
-          if (m.name && m.name !== "contact-shadow") usedMats.add(m.name);
+          if (m.name && m.name !== "contact-shadow" && m.name !== "exterior-ground") {
+            usedMats.add(m.name);
+          }
           const std = m as THREE.MeshStandardMaterial;
           if (std.map || std.normalMap || std.roughnessMap || std.metalnessMap) {
             hasTextures = true;
@@ -532,6 +723,8 @@ export function createAtriumScene({
         ],
         firstPerson: fpController.getState(),
         interaction: interactionManager.getSnapshot(),
+        meeting: meetingRoom.getDiagnostics(),
+        officeCharacters: programmingDemo.getDiagnostics(),
         solidMeshCount,
         triangleCount,
         colliderCount: collisionWorld.getColliderCount(),
@@ -547,6 +740,8 @@ export function createAtriumScene({
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       interactionManager.dispose();
+      meetingRoom.dispose();
+      stickmanMaster.dispose();
       fpController.dispose();
       orbitControls.dispose();
       arch.doors.dispose();

@@ -447,8 +447,10 @@ export function buildFurniture(kit: GeometryKit, collisionWorld: CollisionWorld)
     ld.height,
     true,
   );
-  // Properly hinged open graphite 3D laptop with blue screen detail + muted blue-beige desk notebook
+  // Properly hinged open graphite 3D laptops (east user seat + two west demo developer workstations)
   stampTwoTone(laptopProto, "tech", "accentBlue", ld.cx + 0.06, ld.height, ld.cz + 0.16, Math.PI * 0.48, "detail");
+  stampTwoTone(laptopProto, "tech", "accentBlue", ld.cx - 0.23, ld.height, ld.cz + 0.47, -Math.PI * 0.52, "detail");
+  stampTwoTone(laptopProto, "tech", "accentBlue", ld.cx - 0.23, ld.height, ld.cz - 0.48, -Math.PI * 0.48, "detail");
   const pad = bevelPad(0.22, 0.012, 0.28, 0.008, 0.003, 4);
   transformGeometry(pad, ld.cx + 0.14, ld.height, ld.cz - 0.30, 0.12);
   kit.geo("accentBlue", pad, "detail", 34);

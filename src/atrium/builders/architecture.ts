@@ -442,6 +442,53 @@ export function buildArchitecture(
     kit.solid("clay", partSolid, "structure");
   }
 
+  // ---- Upper-Floor Virtual Meeting Room Entrance Door (North Wall at Top of Stairs) ----
+  {
+    const uy = envelope.upperFloorY;
+    const dx = 3.05;
+    const dw = 1.06;
+    const dh = 2.28;
+    const dz = -depth; // -13.20 m north wall interior face
+
+    // Architectural door casing frame protruding gently into the upper landing
+    const doorFrame = new RectSolid();
+    doorFrame.add(dx - dw / 2 - 0.075, uy, dz, dx - dw / 2, uy + dh + 0.075, dz + 0.085);
+    doorFrame.add(dx + dw / 2, uy, dz, dx + dw / 2 + 0.075, uy + dh + 0.075, dz + 0.085);
+    doorFrame.add(dx - dw / 2 - 0.075, uy + dh, dz, dx + dw / 2 + 0.075, uy + dh + 0.075, dz + 0.085);
+    kit.solid("clay", doorFrame, "structure");
+
+    // Subtle muted-blue architectural lintel accent bar signifying the Meeting Room entrance
+    kit.box(
+      "accentBlue",
+      dx - dw / 2 - 0.075,
+      uy + dh + 0.075,
+      dz,
+      dx + dw / 2 + 0.075,
+      uy + dh + 0.145,
+      dz + 0.07,
+      "detail",
+    );
+
+    // Solid dimensional door leaf + sleek recessed vision lite + pull handle
+    kit.box("desk", dx - dw / 2, uy + 0.012, dz + 0.008, dx + dw / 2, uy + dh, dz + 0.056, "structure");
+    // Vision glass frame & cool-blue reflective glazing
+    kit.box("clay", dx - 0.27, uy + 0.88, dz + 0.052, dx + 0.27, uy + 0.92, dz + 0.068, "detail");
+    kit.box("clay", dx - 0.27, uy + dh - 0.24, dz + 0.052, dx + 0.27, uy + dh - 0.20, dz + 0.068, "detail");
+    kit.box("clay", dx - 0.27, uy + 0.88, dz + 0.052, dx - 0.23, uy + dh - 0.20, dz + 0.068, "detail");
+    kit.box("clay", dx + 0.23, uy + 0.88, dz + 0.052, dx + 0.27, uy + dh - 0.20, dz + 0.068, "detail");
+    kit.box("glass", dx - 0.23, uy + 0.92, dz + 0.056, dx + 0.23, uy + dh - 0.24, dz + 0.064, null);
+    kit.segment("glassGlint", dx - 0.14, uy + 1.15, dz + 0.072, dx + 0.12, uy + 1.62, dz + 0.072);
+    kit.segment("glassGlint", dx - 0.08, uy + 1.42, dz + 0.072, dx + 0.16, uy + 1.85, dz + 0.072);
+
+    // Architectural champagne-gold vertical pull handle on right stile
+    kit.box("accentGold", dx + 0.36, uy + 0.96, dz + 0.056, dx + 0.388, uy + 0.988, dz + 0.102, "detail");
+    kit.box("accentGold", dx + 0.36, uy + 1.32, dz + 0.056, dx + 0.388, uy + 1.348, dz + 0.102, "detail");
+    kit.box("accentGold", dx + 0.36, uy + 0.94, dz + 0.098, dx + 0.388, uy + 1.37, dz + 0.124, "detail");
+
+    // Subtle dark threshold strip at floor plane
+    kit.box("chairBase", dx - dw / 2, uy, dz, dx + dw / 2, uy + 0.012, dz + 0.11, "detail");
+  }
+
   // ---- Recessed Circular Ceiling Downlights under Left & Right Soffits ----
   const addDownlight = (lx: number, ly: number, lz: number) => {
     const bezel = new THREE.CylinderGeometry(0.088, 0.088, 0.012, 18);
