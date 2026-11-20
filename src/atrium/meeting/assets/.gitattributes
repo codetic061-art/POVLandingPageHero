@@ -1,0 +1,2 @@
+# Store small meeting room demo portraits directly in Git so builds without LFS hydration load them cleanly.
+*.jpg -filter -diff -merge -text

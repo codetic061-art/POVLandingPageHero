@@ -8,6 +8,17 @@ import {
   type StickmanRigDiagnostics,
   type StickmanVariant,
 } from "../characters/stickmanMaster";
+import {
+  MeetingPortraitLibrary,
+  createProgrammingCoffeeMug,
+  createScreenShareDisplay,
+  createWebcamPortraitBillboard,
+  createWhiteboardDisplay,
+  type MeetingDisplayKind,
+  type MeetingWallDisplay,
+  type WebcamPortraitController,
+  type WhiteboardWallDisplay,
+} from "./meetingSurfaces";
 
 export interface MeetingParticipantSpec {
   id: string;
@@ -28,6 +39,8 @@ export interface MeetingLayoutMetrics {
   cameraEyeY: number;
 }
 
+export type MeetingFocusState = "seated" | "zooming-in" | "zoomed" | "writing" | "zooming-out";
+
 export interface MeetingDiagnostics {
   active: boolean;
   transitioning: boolean;
@@ -38,6 +51,15 @@ export interface MeetingDiagnostics {
   cameraPitchDeg: number;
   isPitchLocked: boolean;
   isPositionStationary: boolean;
+  focusState: MeetingFocusState;
+  hoveredDisplay: MeetingDisplayKind | null;
+  focusedDisplay: MeetingDisplayKind | null;
+  displayCount: number;
+  hasProgrammingMug: boolean;
+  viewerChairHidden: boolean;
+  portraitCount: number;
+  allOriginalHeadsHidden: boolean;
+  whiteboardStrokeCount: number;
   participants: Array<{
     id: string;
     name: string;
@@ -78,15 +100,15 @@ const CEIL_Y = ATRIUM_CONFIG.envelope.ceilingHeight; // 6.60 m (3.12 m clear cei
 const DOOR_WALL_Z = -(ATRIUM_CONFIG.envelope.depth + ATRIUM_CONFIG.envelope.extWallT + 0.02); // -13.52 m
 const DOOR_X = 3.05; // Aligned directly with upper-right landing Meeting Room door
 const TABLE_TOP_Y = FLOOR_Y + 0.74;
-const TABLE_THICKNESS = 0.048;
-const CHAIR_SEAT_Y = FLOOR_Y + 0.45;
-const CHAIR_BACK_TOP_Y = FLOOR_Y + 0.835; // Strictly below seated chin (0.945 m) & shoulders (0.885 m)
-const USER_EYE_Y = FLOOR_Y + 1.105; // Eye-to-eye with seated stickman head center (1.097 m)
-const LOCKED_PITCH = -0.022; // Level gaze focused squarely on participants' heads & faces
-const MAX_HOVER_YAW = THREE.MathUtils.degToRad(108); // Effortlessly reaches immediate left & right neighbors even at 25+ seats
+const TABLE_THICKNESS = 0.052;
+const CHAIR_BACK_TOP_Y = FLOOR_Y + 0.835; // Strictly below seated portrait frames
+const USER_EYE_Y = FLOOR_Y + 1.155; // Natural eye-level view across portraits, table mug & back-wall displays
+const LOCKED_PITCH = -0.02; // Level gaze focused squarely on portraits & wall displays
+const MAX_HOVER_YAW = THREE.MathUtils.degToRad(108);
 const MEETING_FOV = 54;
 const MEETING_PORTRAIT_FOV = 68;
 const TRANSITION_SEC = 0.58;
+const ZOOM_TRANSITION_SEC = 0.52;
 
 const DEFAULT_DEMO_NAMES = [
   "Alex",
@@ -135,10 +157,8 @@ export function createDefaultMeetingParticipants(count = 5): MeetingParticipantS
  * for any participant count (tested from 2 up to 24+ participants).
  */
 export function computeMeetingLayout(participantCount: number): MeetingLayoutMetrics {
-  const totalSeats = Math.max(4, participantCount + 1); // seat 0 = stationary user
-  // Comfortable arc per seat: spacious 1.08 m for intimate meetings, scaling smoothly to 0.88 m for 20+ seats
-  const seatArcSpacing =
-    totalSeats <= 8 ? 1.08 : totalSeats <= 14 ? 0.96 : 0.88;
+  const totalSeats = Math.max(4, participantCount + 1); // seat 0 = viewer position (no chair/avatar rendered)
+  const seatArcSpacing = totalSeats <= 8 ? 1.08 : totalSeats <= 14 ? 0.96 : 0.88;
   const chairRadius = Math.max(1.85, (totalSeats * seatArcSpacing) / (2 * Math.PI));
   const tableRadius = Math.max(1.22, chairRadius - 0.58);
   const roomHalfSpan = Math.max(4.65, chairRadius + 1.95);
@@ -158,11 +178,6 @@ export function computeMeetingLayout(participantCount: number): MeetingLayoutMet
   };
 }
 
-/**
- * Builds a single reusable low-profile executive conference chair group
- * (sculpted slate blue-gray seat & contoured backrest strictly below head/shoulder height,
- * charcoal 5-star pedestal base, and sleek low armrests).
- */
 interface ConferenceChairPrototypes {
   seatGeo: THREE.BufferGeometry;
   baseGeo: THREE.BufferGeometry;
@@ -197,21 +212,17 @@ function createConferenceChairPrototypes(): ConferenceChairPrototypes {
     baseKit.geo("chairBase", caster, null);
   }
 
-  // Under-seat tilt mechanism plate
   baseKit.box("chairBase", -0.1, 0.38, -0.1, 0.1, 0.42, 0.1, "detail");
 
-  // Sculpted upholstered conference seat (seat top = 0.45 m, width = 0.48 m, depth = 0.46 m)
   const seat = new THREE.BoxGeometry(0.48, 0.056, 0.45);
   transformGeometry(seat, 0, 0.422, 0.01);
   seatKit.geo("chair", seat, "furniture", 28);
 
-  // Rounded front waterfall bolster
   const frontRoll = new THREE.CylinderGeometry(0.028, 0.028, 0.478, 12);
   frontRoll.rotateZ(Math.PI / 2);
   transformGeometry(frontRoll, 0, 0.422, 0.235);
   seatKit.geo("chair", frontRoll, null);
 
-  // Curved low-profile backrest (Y = 0.47..0.835 -> cleanly below seated shoulders & head!)
   const backMain = new THREE.BoxGeometry(0.45, 0.34, 0.048);
   transformGeometry(backMain, 0, 0.655, -0.215);
   seatKit.geo("chair", backMain, "furniture", 28);
@@ -221,19 +232,17 @@ function createConferenceChairPrototypes(): ConferenceChairPrototypes {
   transformGeometry(backTopRoll, 0, 0.825, -0.215);
   seatKit.geo("chair", backTopRoll, null);
 
-  // Slight wrap side bolsters on backrest
   for (const side of [-1, 1] as const) {
     const bolster = new THREE.BoxGeometry(0.046, 0.32, 0.068);
     transformGeometry(bolster, side * 0.218, 0.65, -0.19, -side * 0.22);
     seatKit.geo("chair", bolster, "detail", 32);
 
-    // Low sleek conference armrests (top at 0.635 m, well below table & shoulders)
     baseKit.box("chairBase", side * 0.24 - 0.012, 0.42, -0.12, side * 0.24 + 0.012, 0.615, -0.08, "detail");
     baseKit.box("chairBase", side * 0.24 - 0.012, 0.42, 0.08, side * 0.24 + 0.012, 0.615, 0.12, "detail");
     seatKit.box("chair", side * 0.24 - 0.022, 0.612, -0.16, side * 0.24 + 0.022, 0.642, 0.15, "detail");
   }
 
-  // Spine support connecting seat to rear of backrest (flush behind cushion)
+  // Spine support flush behind cushion
   baseKit.box("chairBase", -0.036, 0.41, -0.272, 0.036, 0.64, -0.24, "detail");
 
   const seatGeo = bucketToGeometry(seatKit.buckets.chair);
@@ -257,12 +266,156 @@ function createConferenceChairPrototypes(): ConferenceChairPrototypes {
 }
 
 /**
- * Dedicated Upper-Floor Virtual Meeting Room module.
- * Cleanly separated from general office navigation & interaction logic.
- * - Dynamically scales circular conference table, chair ring, and architectural room shell
- *   for variable meeting sizes (default 5 demo participants, scalable to 20+ without overlap).
- * - Implements stationary seated camera with strictly horizontal-only mouse viewing
- *   (no walking, no vertical camera tilt, clear face visibility for immediate neighbors & across table).
+ * Compact low-profile open laptop geometry placed in front of each meeting participant
+ * (lid top strictly at ~0.145 m above tabletop so circular portraits remain 100% unobstructed).
+ */
+interface LaptopPrototype {
+  geo: THREE.BufferGeometry;
+  lines: number[];
+  dispose: () => void;
+}
+
+function createMeetingLaptopPrototype(): LaptopPrototype {
+  const kit = new GeometryKit();
+  // Slim base keyboard deck (width 0.30 m, depth 0.20 m, height 0.014 m)
+  kit.box("tech", -0.15, 0, -0.1, 0.15, 0.014, 0.1, "detail");
+  // Tilted low-profile screen lid facing the seated participant (-Z = toward participant, +Z = toward table center)
+  const lid = new THREE.BoxGeometry(0.3, 0.16, 0.012);
+  lid.translate(0, 0.08, 0);
+  lid.rotateX(0.32); // Tilted gently back toward table center
+  lid.translate(0, 0.012, 0.092);
+  kit.geo("tech", lid, "detail", 32);
+
+  const geo = bucketToGeometry(kit.buckets.tech);
+  return {
+    geo,
+    lines: [...kit.lines.detail],
+    dispose() {
+      geo.dispose();
+    },
+  };
+}
+
+const SCOPED_MEETING_UI_CSS = `
+.meeting-context-hint {
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  z-index: 39;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 1px solid rgb(186 214 245 / 44%);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgb(32 48 72 / 82%), rgb(20 32 52 / 76%));
+  box-shadow:
+    0 8px 24px rgb(16 28 48 / 24%),
+    0 0 18px rgb(86 144 232 / 24%),
+    inset 0 1px 0 rgb(255 255 255 / 24%);
+  backdrop-filter: blur(12px) saturate(135%);
+  -webkit-backdrop-filter: blur(12px) saturate(135%);
+  color: #f6f9fd;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  transform: translate(-50%, -6px);
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.meeting-context-hint.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+.meeting-context-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 5px;
+  border: 1px solid rgb(255 255 255 / 34%);
+  background: rgb(255 255 255 / 16%);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+.meeting-wb-toolbar {
+  position: absolute;
+  bottom: 72px;
+  left: 50%;
+  z-index: 41;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid rgb(186 214 245 / 44%);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgb(30 44 68 / 86%), rgb(19 30 48 / 82%));
+  box-shadow: 0 10px 26px rgb(16 28 48 / 26%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #f4f8fd;
+  font-size: 12px;
+  transform: translate(-50%, 8px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms ease, visibility 180ms ease;
+}
+.meeting-wb-toolbar.is-visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+.meeting-wb-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 2px solid rgb(255 255 255 / 45%);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+.meeting-wb-swatch[aria-pressed="true"] {
+  border-color: #ffffff;
+  transform: scale(1.18);
+  box-shadow: 0 0 0 2px rgb(90 168 255 / 60%);
+}
+.meeting-wb-clear {
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgb(255 255 255 / 26%);
+  background: rgb(255 255 255 / 12%);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.meeting-wb-clear:hover {
+  background: rgb(255 255 255 / 22%);
+}
+`;
+
+/**
+ * Dedicated Upper-Floor Virtual Meeting Room module (strictly self-contained).
+ * - Hybrid 3D architectural meeting room + flat 2D circular human webcam portrait frames
+ *   attached to original 3D stickman bodies (original 3D heads hidden, ready for live video textures).
+ * - Viewer seat & avatar completely omitted from foreground.
+ * - Exactly TWO independent back-wall displays: Screen Sharing desktop dashboard & Glass Whiteboard.
+ * - Proper 3D raycasting mouse targeting, hover highlight, Press Z to Zoom, Press A to Write
+ *   (whiteboard only), and layered Esc return that never accidentally exits the meeting room.
  */
 export function createVirtualMeetingRoom(
   host: HTMLDivElement,
@@ -275,26 +428,63 @@ export function createVirtualMeetingRoom(
   const group = new THREE.Group();
   group.name = "upper-floor-virtual-meeting-room";
 
-  const roomDynamicGroup = new THREE.Group();
-  roomDynamicGroup.name = "meeting-room-shell-and-table";
-  group.add(roomDynamicGroup);
+  const roomShellGroup = new THREE.Group();
+  roomShellGroup.name = "meeting-room-shell-and-table";
+  group.add(roomShellGroup);
+
+  const displaysGroup = new THREE.Group();
+  displaysGroup.name = "meeting-room-back-displays";
+  group.add(displaysGroup);
+
+  const chairsAndPropsGroup = new THREE.Group();
+  chairsAndPropsGroup.name = "meeting-room-chairs-and-props";
+  group.add(chairsAndPropsGroup);
 
   const participantsGroup = new THREE.Group();
   participantsGroup.name = "meeting-room-participants";
   group.add(participantsGroup);
 
-  // Dedicated soft architectural lighting for the upper-floor conference room
+  // Dedicated soft warm-neutral architectural lighting for the conference room
   const lightsGroup = new THREE.Group();
   lightsGroup.name = "meeting-room-lights";
-  const ringPendantLight = new THREE.PointLight(0xfff1d6, 1.35, 16, 1.0);
-  const softFillA = new THREE.PointLight(0xf6f9ff, 0.58, 15, 1.0);
-  const softFillB = new THREE.PointLight(0xfff4e2, 0.52, 15, 1.0);
+  const ringPendantLight = new THREE.PointLight(0xfff4df, 1.38, 16, 1.0);
+  const softFillA = new THREE.PointLight(0xf6f9ff, 0.62, 15, 1.0);
+  const softFillB = new THREE.PointLight(0xfff5e6, 0.56, 15, 1.0);
   lightsGroup.add(ringPendantLight, softFillA, softFillB);
   group.add(lightsGroup);
 
   const chairProto = createConferenceChairPrototypes();
+  const laptopProto = createMeetingLaptopPrototype();
+  let forceRenderFlag = false;
+  let lastIdleAnimSec = -1;
+  const portraitLibrary = new MeetingPortraitLibrary(() => {
+    forceRenderFlag = true;
+  });
+
+  // Dedicated matte warm-sand conference tabletop materials matching reference aesthetic
+  const warmTableMat = new THREE.MeshStandardMaterial({
+    name: "meeting-table-warm",
+    color: new THREE.Color("#e8c59e"),
+    roughness: 0.88,
+    metalness: 0.0,
+    envMapIntensity: 0.14,
+  });
+  const warmInlayMat = new THREE.MeshStandardMaterial({
+    name: "meeting-table-inlay",
+    color: new THREE.Color("#caa27a"),
+    roughness: 0.84,
+    metalness: 0.0,
+    envMapIntensity: 0.16,
+  });
+
   let dynamicDisposables: THREE.BufferGeometry[] = [];
   let dynamicMaterials: THREE.Material[] = [];
+  let dynamicCleanups: Array<() => void> = [];
+  let portraitControllers: WebcamPortraitController[] = [];
+
+  let screenDisplay: MeetingWallDisplay | null = null;
+  let whiteboardDisplay: WhiteboardWallDisplay | null = null;
+  let hasProgrammingMug = false;
 
   let participants: MeetingParticipantSpec[] = createDefaultMeetingParticipants(5);
   let characters: StickmanInstance[] = [];
@@ -302,17 +492,44 @@ export function createVirtualMeetingRoom(
   let roomCenterX = 0;
   let roomCenterZ = DOOR_WALL_Z - layout.roomHalfSpan;
 
-  // Seated camera state (strictly stationary position, strictly locked horizontal-only pitch)
+  // Seated camera state (strictly stationary position, strictly locked horizontal-only pitch when seated)
   let active = false;
   let yaw = 0;
   let targetYaw = 0;
   let hoverYaw = 0;
   let dragYawOffset = 0;
-  let isDragging = false;
+  let isDraggingLook = false;
   let lastPointerX = 0;
   let activePointerId: number | null = null;
 
-  // Smooth enter/exit camera transition (zero loading screens)
+  // Display raycasting, zoom & whiteboard writing state machine
+  const raycaster = new THREE.Raycaster();
+  const pointerNdc = new THREE.Vector2(0, 0);
+  let pointerTracked = false;
+  let focusState: MeetingFocusState = "seated";
+  let hoveredDisplay: MeetingDisplayKind | null = null;
+  let focusedDisplay: MeetingDisplayKind | null = null;
+
+  // Whiteboard drawing interaction state
+  let activeMarkerColor = "#22345a";
+  let isDrawingStroke = false;
+  let drawPointerId: number | null = null;
+  let lastDrawUV: { u: number; v: number } | null = null;
+
+  // Smooth zoom-in / zoom-out camera interpolation state
+  let zoomAnim: null | {
+    kind: "in" | "out";
+    elapsed: number;
+    duration: number;
+    fromPos: THREE.Vector3;
+    toPos: THREE.Vector3;
+    fromQuat: THREE.Quaternion;
+    toQuat: THREE.Quaternion;
+  } = null;
+  const savedSeatedPos = new THREE.Vector3();
+  let savedSeatedYaw = 0;
+
+  // Smooth enter/exit meeting-room transition (zero loading screens)
   let transitionState: null | {
     kind: "enter" | "exit";
     elapsed: number;
@@ -326,12 +543,16 @@ export function createVirtualMeetingRoom(
     onComplete?: () => void;
   } = null;
 
-  // Minimal Glassmorphism active meeting status bar
+  // Self-contained scoped styles & minimal contextual hints (owned & cleaned up by meeting room)
+  const styleEl = document.createElement("style");
+  styleEl.setAttribute("data-meeting-room-ui", "true");
+  styleEl.textContent = SCOPED_MEETING_UI_CSS;
+  document.head.append(styleEl);
+
   const statusPillEl = document.createElement("div");
   statusPillEl.className = "atrium-active-pill atrium-meeting-pill";
   statusPillEl.setAttribute("data-name", "Meeting Room / Status");
   statusPillEl.setAttribute("aria-hidden", "true");
-
   const pillDot = document.createElement("span");
   pillDot.className = "atrium-active-dot";
   const statusTextEl = document.createElement("span");
@@ -339,26 +560,148 @@ export function createVirtualMeetingRoom(
   statusPillEl.append(pillDot, statusTextEl);
   host.append(statusPillEl);
 
+  // Subtle top-center contextual hint pill (Press Z to Zoom / Press A to Write / Press Esc to Return)
+  const contextHintEl = document.createElement("div");
+  contextHintEl.className = "meeting-context-hint";
+  contextHintEl.setAttribute("data-name", "Meeting Room / Context hint");
+  contextHintEl.setAttribute("aria-live", "polite");
+  contextHintEl.setAttribute("aria-hidden", "true");
+  host.append(contextHintEl);
+
+  // Minimal floating whiteboard marker bar (ONLY visible while actively writing on whiteboard)
+  const wbToolbarEl = document.createElement("div");
+  wbToolbarEl.className = "meeting-wb-toolbar";
+  wbToolbarEl.setAttribute("data-name", "Meeting Room / Whiteboard tools");
+  wbToolbarEl.setAttribute("aria-hidden", "true");
+
+  const wbLabel = document.createElement("span");
+  wbLabel.textContent = "Marker:";
+  wbLabel.style.fontWeight = "600";
+  wbToolbarEl.append(wbLabel);
+
+  const swatchColors = [
+    { name: "Navy", hex: "#22345a" },
+    { name: "Blue", hex: "#2f6fed" },
+    { name: "Coral", hex: "#d94b64" },
+    { name: "Green", hex: "#228b5b" },
+  ];
+  const swatchButtons: HTMLButtonElement[] = [];
+  for (const sc of swatchColors) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "meeting-wb-swatch";
+    btn.title = sc.name;
+    btn.setAttribute("aria-label", `${sc.name} marker`);
+    btn.setAttribute("aria-pressed", String(sc.hex === activeMarkerColor));
+    btn.style.background = sc.hex;
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      activeMarkerColor = sc.hex;
+      for (const b of swatchButtons) {
+        b.setAttribute("aria-pressed", String(b === btn));
+      }
+    });
+    swatchButtons.push(btn);
+    wbToolbarEl.append(btn);
+  }
+
+  const clearBtn = document.createElement("button");
+  clearBtn.type = "button";
+  clearBtn.className = "meeting-wb-clear";
+  clearBtn.textContent = "Reset notes";
+  clearBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    whiteboardDisplay?.clearUserDrawings();
+    forceRenderFlag = true;
+  });
+  wbToolbarEl.append(clearBtn);
+  host.append(wbToolbarEl);
+
+  let lastHintMarkup = "";
+  function syncContextualUI(): void {
+    if (!active || transitionState) {
+      contextHintEl.classList.remove("is-visible");
+      contextHintEl.setAttribute("aria-hidden", "true");
+      wbToolbarEl.classList.remove("is-visible");
+      wbToolbarEl.setAttribute("aria-hidden", "true");
+      canvas.style.cursor = "";
+      return;
+    }
+
+    const showStatus = focusState === "seated";
+    statusPillEl.classList.toggle("is-visible", showStatus);
+    statusPillEl.setAttribute("aria-hidden", String(!showStatus));
+
+    let hintMarkup = "";
+    if (focusState === "seated" && hoveredDisplay) {
+      hintMarkup = `Press <kbd>Z</kbd> to Zoom`;
+    } else if (focusState === "zoomed" || focusState === "zooming-in") {
+      if (focusedDisplay === "whiteboard") {
+        hintMarkup = `Press <kbd>A</kbd> to Write &nbsp;·&nbsp; Press <kbd>Esc</kbd> to Return`;
+      } else {
+        hintMarkup = `Press <kbd>Esc</kbd> to Return`;
+      }
+    } else if (focusState === "writing") {
+      hintMarkup = `Drag on Whiteboard to Write &nbsp;·&nbsp; Press <kbd>Esc</kbd> to Return`;
+    }
+
+    if (hintMarkup !== lastHintMarkup) {
+      lastHintMarkup = hintMarkup;
+      contextHintEl.innerHTML = hintMarkup;
+    }
+    const hintVisible = hintMarkup.length > 0;
+    contextHintEl.classList.toggle("is-visible", hintVisible);
+    contextHintEl.setAttribute("aria-hidden", String(!hintVisible));
+
+    const writingNow = focusState === "writing";
+    wbToolbarEl.classList.toggle("is-visible", writingNow);
+    wbToolbarEl.setAttribute("aria-hidden", String(!writingNow));
+    canvas.style.cursor = writingNow
+      ? "crosshair"
+      : focusState === "seated" && hoveredDisplay
+        ? "pointer"
+        : "";
+  }
+
   const updateStatusText = () => {
-    statusTextEl.textContent = `Virtual Meeting (${participants.length} participants) · Move mouse left/right to look · Press E or Esc to leave`;
+    statusTextEl.textContent = `Virtual Meeting (${participants.length} participants) · Move mouse to look & target displays · Press E or Esc to leave`;
   };
   updateStatusText();
 
   const getUserEyePosition = (out = new THREE.Vector3()): THREE.Vector3 => {
-    // Seated cleanly at seat 0 (south of circular table), slightly forward of backrest for optimal face framing
-    return out.set(roomCenterX, USER_EYE_Y, roomCenterZ + layout.chairRadius - 0.14);
+    // Viewer sits behind the camera at seat 0 (no viewer chair or avatar rendered)
+    return out.set(roomCenterX, USER_EYE_Y, roomCenterZ + layout.chairRadius - 0.12);
   };
 
   const getAdaptiveHoverYaw = (): number => {
-    // Immediate neighbor angle on the circle is (90° - 180°/totalSeats); add 12° breathing margin
     const neighborAngle = Math.PI * 0.5 - Math.PI / layout.totalSeats;
     return Math.min(MAX_HOVER_YAW, neighborAngle + THREE.MathUtils.degToRad(12));
   };
 
+  function getDisplayByKind(kind: MeetingDisplayKind | null): MeetingWallDisplay | null {
+    if (kind === "screen") return screenDisplay;
+    if (kind === "whiteboard") return whiteboardDisplay;
+    return null;
+  }
+
+  function setParticipantsVisibleForFocus(visible: boolean): void {
+    participantsGroup.visible = visible;
+    chairsAndPropsGroup.visible = visible;
+  }
+
   function clearDynamicBuild(): void {
-    roomDynamicGroup.clear();
+    roomShellGroup.clear();
+    displaysGroup.clear();
+    chairsAndPropsGroup.clear();
     participantsGroup.clear();
     characters = [];
+    for (const pc of portraitControllers) pc.dispose();
+    portraitControllers = [];
+    for (const fn of dynamicCleanups) fn();
+    dynamicCleanups = [];
+    screenDisplay = null;
+    whiteboardDisplay = null;
+    hasProgrammingMug = false;
     for (const g of dynamicDisposables) g.dispose();
     for (const m of dynamicMaterials) m.dispose();
     dynamicDisposables = [];
@@ -388,23 +731,18 @@ export function createVirtualMeetingRoom(
     return mesh;
   }
 
-  /**
-   * Rebuilds the room shell, circular conference table, chair ring, and seated demo stickmen
-   * cleanly for the current participant list.
-   */
   function rebuildMeetingRoom(): void {
     clearDynamicBuild();
 
     layout = computeMeetingLayout(participants.length);
     const R = layout.roomHalfSpan;
     const wallT = 0.24;
-    // Keep room centered symmetrically at X = 0 for normal sizes
     roomCenterX = 0;
     roomCenterZ = DOOR_WALL_Z - R;
 
     const x0 = roomCenterX - R;
     const x1 = roomCenterX + R;
-    const zSouth = DOOR_WALL_Z; // Inner face of south wall (aligned behind atrium north wall)
+    const zSouth = DOOR_WALL_Z;
     const zNorth = roomCenterZ - R;
     const y0 = FLOOR_Y;
     const y1 = CEIL_Y;
@@ -419,88 +757,57 @@ export function createVirtualMeetingRoom(
 
     const kit = new GeometryKit();
 
-    // ---- 1. Architectural Conference Room Shell (Matte White Walls & Ceiling + Warm-Gray Floor) ----
+    // ---- 1. Architectural Conference Room Shell (Clean solid North wall for 2 displays + West/East daylight windows) ----
     const shell = new RectSolid();
     const zSouthOut = zSouth + 0.04;
-    // Floor slab & ceiling slab (flush with all 4 exterior wall edges — zero corner line artifacts!)
     shell.add(x0 - wallT, y0 - 0.28, zNorth - wallT, x1 + wallT, y0, zSouthOut);
     shell.add(x0 - wallT, y1, zNorth - wallT, x1 + wallT, y1 + 0.26, zSouthOut);
-    // West, East, North & South walls
     shell.add(x0 - wallT, y0, zNorth - wallT, x0, y1, zSouthOut);
     shell.add(x1, y0, zNorth - wallT, x1 + wallT, y1, zSouthOut);
     shell.add(x0 - wallT, y0, zNorth - wallT, x1 + wallT, y1, zNorth);
     shell.add(x0 - wallT, y0, zSouth, x1 + wallT, y1, zSouthOut);
 
-    // Carve modern horizontal panoramic windows on West & East walls, plus TWO balanced flanking windows
-    // on the North wall leaving a clean solid architectural wall center for the presentation display
-    const winSillY = y0 + 0.88;
-    const winHeadY = y1 - 0.48;
+    // Panoramic modern side windows on West (left) & East (right) walls matching reference image
+    const winSillY = y0 + 0.84;
+    const winHeadY = y1 - 0.46;
     const winInset = 1.05;
-    const northBoardHalf = Math.min(1.58, R * 0.34);
-    shell.sub(x0 + winInset, winSillY, zNorth - wallT - 0.05, roomCenterX - northBoardHalf, winHeadY, zNorth + 0.05);
-    shell.sub(roomCenterX + northBoardHalf, winSillY, zNorth - wallT - 0.05, x1 - winInset, winHeadY, zNorth + 0.05);
     shell.sub(x0 - wallT - 0.05, winSillY, zNorth + winInset, x0 + 0.05, winHeadY, zSouth - winInset);
     shell.sub(x1 - 0.05, winSillY, zNorth + winInset, x1 + wallT + 0.05, winHeadY, zSouth - winInset);
 
     const builtShell = shell.build(undefined, [y0]);
-    addDynamicMesh(roomDynamicGroup, "meeting-shell-walls", builtShell.geometry, materials.clay, false, true);
-    addDynamicMesh(roomDynamicGroup, "meeting-shell-floor", builtShell.floorGeometry, materials.floor, false, true);
+    addDynamicMesh(roomShellGroup, "meeting-shell-walls", builtShell.geometry, materials.clay, false, true);
+    addDynamicMesh(roomShellGroup, "meeting-shell-floor", builtShell.floorGeometry, materials.floor, false, true);
     const shellLines = materials.createLines("structure", builtShell.edges);
     if (shellLines) {
       dynamicDisposables.push(shellLines.geometry);
-      roomDynamicGroup.add(shellLines);
+      roomShellGroup.add(shellLines);
     }
 
-    // Glazed mullions & reflective cool-blue tinted windows on North (flanking), West, and East walls
-    const addMeetingWindowBank = (
-      axis: "z" | "x",
-      fixedCoord: number,
-      spanStart: number,
-      spanEnd: number,
-      bays: number,
-    ) => {
+    const addSideWindowBank = (fixedX: number, spanStart: number, spanEnd: number, bays: number) => {
       const frame = new RectSolid();
       const ft = 0.05;
-      if (axis === "z") {
-        frame.add(spanStart, winSillY, fixedCoord - ft, spanEnd, winSillY + ft, fixedCoord + ft);
-        frame.add(spanStart, winHeadY - ft, fixedCoord - ft, spanEnd, winHeadY, fixedCoord + ft);
-        for (let i = 0; i <= bays; i++) {
-          const mx = spanStart + ((spanEnd - spanStart) * i) / bays;
-          frame.add(mx - 0.028, winSillY, fixedCoord - ft, mx + 0.028, winHeadY, fixedCoord + ft);
-          if (i < bays) {
-            const nx = spanStart + ((spanEnd - spanStart) * (i + 1)) / bays;
-            kit.box("glass", mx + 0.028, winSillY + ft, fixedCoord - 0.008, nx - 0.028, winHeadY - ft, fixedCoord + 0.008, null);
-          }
-        }
-      } else {
-        frame.add(fixedCoord - ft, winSillY, spanStart, fixedCoord + ft, winSillY + ft, spanEnd);
-        frame.add(fixedCoord - ft, winHeadY - ft, spanStart, fixedCoord + ft, winHeadY, spanEnd);
-        for (let i = 0; i <= bays; i++) {
-          const mz = spanStart + ((spanEnd - spanStart) * i) / bays;
-          frame.add(fixedCoord - ft, winSillY, mz - 0.028, fixedCoord + ft, winHeadY, mz + 0.028);
-          if (i < bays) {
-            const nz = spanStart + ((spanEnd - spanStart) * (i + 1)) / bays;
-            kit.box("glass", fixedCoord - 0.008, winSillY + ft, mz + 0.028, fixedCoord + 0.008, winHeadY - ft, nz - 0.028, null);
-          }
+      frame.add(fixedX - ft, winSillY, spanStart, fixedX + ft, winSillY + ft, spanEnd);
+      frame.add(fixedX - ft, winHeadY - ft, spanStart, fixedX + ft, winHeadY, spanEnd);
+      for (let i = 0; i <= bays; i++) {
+        const mz = spanStart + ((spanEnd - spanStart) * i) / bays;
+        frame.add(fixedX - ft, winSillY, mz - 0.028, fixedX + ft, winHeadY, mz + 0.028);
+        if (i < bays) {
+          const nz = spanStart + ((spanEnd - spanStart) * (i + 1)) / bays;
+          kit.box("glass", fixedX - 0.008, winSillY + ft, mz + 0.028, fixedX + 0.008, winHeadY - ft, nz - 0.028, null);
         }
       }
       kit.solid("clay", frame, "detail");
     };
-
     const sideWindowBays = Math.max(3, Math.round((R * 2 - winInset * 2) / 1.8));
-    const northFlankBays = Math.max(1, Math.round((R - winInset - northBoardHalf) / 1.4));
-    addMeetingWindowBank("z", zNorth - wallT * 0.5, x0 + winInset, roomCenterX - northBoardHalf, northFlankBays);
-    addMeetingWindowBank("z", zNorth - wallT * 0.5, roomCenterX + northBoardHalf, x1 - winInset, northFlankBays);
-    addMeetingWindowBank("x", x0 - wallT * 0.5, zNorth + winInset, zSouth - winInset, sideWindowBays);
-    addMeetingWindowBank("x", x1 + wallT * 0.5, zNorth + winInset, zSouth - winInset, sideWindowBays);
+    addSideWindowBank(x0 - wallT * 0.5, zNorth + winInset, zSouth - winInset, sideWindowBays);
+    addSideWindowBank(x1 + wallT * 0.5, zNorth + winInset, zSouth - winInset, sideWindowBays);
 
-    // Subtle acoustic architectural wall ribs & baseboard trim
+    // Subtle baseboard trim & floor joint grid
     kit.box("clay", x0, y0, zNorth, x1, y0 + 0.08, zNorth + 0.02, "detail");
     kit.box("clay", x0, y0, zSouth - 0.02, x1, y0 + 0.08, zSouth, "detail");
     kit.box("clay", x0, y0, zNorth, x0 + 0.02, y0 + 0.08, zSouth, "detail");
     kit.box("clay", x1 - 0.02, y0, zNorth, x1, y0 + 0.08, zSouth, "detail");
 
-    // Subtle floor tile joint grid
     const grid = 1.15;
     for (let gx = x0 + grid; gx < x1 - 0.2; gx += grid) {
       kit.segment("floorGrid", gx, y0 + 0.001, zNorth + 0.05, gx, y0 + 0.001, zSouth - 0.05);
@@ -509,7 +816,7 @@ export function createVirtualMeetingRoom(
       kit.segment("floorGrid", x0 + 0.05, y0 + 0.001, gz, x1 - 0.05, y0 + 0.001, gz);
     }
 
-    // ---- 2. Visible Interior Entrance Door on South Wall (aligned with landing door at X = 3.05) ----
+    // ---- 2. Visible Interior Entrance Door on South Wall ----
     {
       const dx = THREE.MathUtils.clamp(DOOR_X, x0 + 0.9, x1 - 0.9);
       const dw = 1.06;
@@ -521,87 +828,120 @@ export function createVirtualMeetingRoom(
       frame.add(dx - dw / 2 - 0.07, y0 + dh, dz - 0.08, dx + dw / 2 + 0.07, y0 + dh + 0.07, dz);
       kit.solid("clay", frame, "structure");
 
-      // Door leaf + vision lite + pull handle + blue architectural transom bar
       kit.box("desk", dx - dw / 2, y0 + 0.01, dz - 0.05, dx + dw / 2, y0 + dh, dz - 0.005, "structure");
       kit.box("glass", dx - 0.24, y0 + 0.92, dz - 0.058, dx + 0.24, y0 + dh - 0.22, dz - 0.05, null);
       kit.box("accentBlue", dx - dw / 2 - 0.07, y0 + dh + 0.07, dz - 0.06, dx + dw / 2 + 0.07, y0 + dh + 0.14, dz, "detail");
       kit.box("accentGold", dx - 0.38, y0 + 0.96, dz - 0.095, dx - 0.355, y0 + 1.32, dz - 0.05, "detail");
     }
 
-    // ---- 3. Executive Office Details: Subtle Credenza & Corner Plants (well clear of table ring) ----
+    // ---- 3. EXACTLY TWO Separate Back-Wall Displays (Screen Sharing + Glass Whiteboard) ----
     {
-      // Sleek matte neutral credenza against the north wall center
-      const credW = Math.min(2.6, R * 0.56);
-      kit.box("desk", roomCenterX - credW / 2, y0 + 0.08, zNorth + 0.04, roomCenterX + credW / 2, y0 + 0.72, zNorth + 0.48, "furniture");
-      kit.box("chairBase", roomCenterX - credW / 2 + 0.08, y0, zNorth + 0.08, roomCenterX + credW / 2 - 0.08, y0 + 0.08, zNorth + 0.44, "detail");
+      const displayCenterY = y0 + 1.84;
+      const displayHeight = 1.50;
+      const screenWidth = 2.62;
+      const wbWidth = 2.28;
+      const gap = 0.38;
+      const totalSpan = screenWidth + gap + wbWidth;
+      const screenCenterX = roomCenterX - totalSpan / 2 + screenWidth / 2;
+      const wbCenterX = roomCenterX + totalSpan / 2 - wbWidth / 2;
 
-      // Wall-mounted presentation screen / acoustic board on north wall above credenza (does not block any participant)
-      const boardW = Math.min(2.8, R * 0.62);
-      kit.box("tech", roomCenterX - boardW / 2, y0 + 1.18, zNorth + 0.02, roomCenterX + boardW / 2, y0 + 2.38, zNorth + 0.055, "detail");
-      kit.box("accentBlue", roomCenterX - boardW / 2 + 0.04, y0 + 1.22, zNorth + 0.055, roomCenterX + boardW / 2 - 0.04, y0 + 2.34, zNorth + 0.062, null);
+      screenDisplay = createScreenShareDisplay(screenCenterX, displayCenterY, zNorth + 0.01, screenWidth, displayHeight);
+      whiteboardDisplay = createWhiteboardDisplay(wbCenterX, displayCenterY, zNorth + 0.01, wbWidth, displayHeight);
 
-      // Two corner botanical planters for soft architectural warmth
+      displaysGroup.add(screenDisplay.group, whiteboardDisplay.group);
+      dynamicCleanups.push(() => {
+        screenDisplay?.dispose();
+        whiteboardDisplay?.dispose();
+      });
+    }
+
+    // ---- 4. Corner Botanical Plants & Overhead Ceiling Downlights (friendly studio framing) ----
+    {
       for (const side of [-1, 1] as const) {
         const px = side < 0 ? x0 + 0.56 : x1 - 0.56;
-        const pz = zNorth + 0.56;
-        const pot = new THREE.CylinderGeometry(0.22, 0.17, 0.42, 16);
-        transformGeometry(pot, px, y0 + 0.21, pz);
+        const pz = zNorth + 0.54;
+        const pot = new THREE.CylinderGeometry(0.22, 0.17, 0.44, 16);
+        transformGeometry(pot, px, y0 + 0.22, pz);
         kit.geo("clay", pot, "furniture", 30);
 
-        for (let i = 0; i < 10; i++) {
-          const ang = (i / 10) * Math.PI * 2 + side * 0.4;
-          const h = 0.58 + (i % 3) * 0.14;
-          const leafGeo = new THREE.ConeGeometry(0.075, h, 5);
-          leafGeo.scale(1.0, 1.0, 0.28);
+        for (let i = 0; i < 12; i++) {
+          const ang = (i / 12) * Math.PI * 2 + side * 0.35;
+          const h = 0.64 + (i % 3) * 0.16;
+          const leafGeo = new THREE.ConeGeometry(0.082, h, 5);
+          leafGeo.scale(1.0, 1.0, 0.26);
           leafGeo.translate(0, h * 0.5, 0);
-          leafGeo.rotateX(0.32 + (i % 2) * 0.16);
+          leafGeo.rotateX(0.28 + (i % 2) * 0.15);
           leafGeo.rotateY(ang);
-          leafGeo.translate(px, y0 + 0.39, pz);
+          leafGeo.translate(px, y0 + 0.41, pz);
           kit.geo("plant", leafGeo, null);
         }
+
+        // Recessed soft ceiling downlights matching reference ceiling fixtures
+        const bezel = new THREE.CylinderGeometry(0.14, 0.14, 0.014, 20);
+        transformGeometry(bezel, roomCenterX + side * (R * 0.52), y1 - 0.008, zNorth + 1.35);
+        kit.geo("accentGold", bezel, "detail", 32);
       }
     }
 
-    // ---- 4. Warm Champagne-Gold Circular Architectural Ring Pendant Overhead ----
-    {
-      const pendantR = Math.min(layout.tableRadius * 0.82, 2.15);
-      const pendantY = y1 - 0.48;
-      const ringGeo = new THREE.TorusGeometry(pendantR, 0.036, 12, 48);
-      ringGeo.rotateX(Math.PI / 2);
-      ringGeo.translate(roomCenterX, pendantY, roomCenterZ);
-      kit.geo("accentGold", ringGeo, "detail", 36);
-
-      // 4 crisp suspension rods to ceiling
-      for (let i = 0; i < 4; i++) {
-        const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
-        const rod = new THREE.CylinderGeometry(0.008, 0.008, 0.48, 8);
-        transformGeometry(rod, roomCenterX + Math.cos(a) * pendantR, pendantY + 0.24, roomCenterZ + Math.sin(a) * pendantR);
-        kit.geo("chairBase", rod, null);
-      }
-    }
-
-    // ---- 5. Large Circular Conference Table (clean, beveled, zero face-blocking objects) ----
+    // ---- 5. Warm Illustrated Circular Conference Table + Center Inlay ----
     {
       const tr = layout.tableRadius;
-      const segs = Math.max(48, Math.min(96, Math.round(tr * 36)));
+      const segs = Math.max(56, Math.min(96, Math.round(tr * 40)));
 
-      // Main circular tabletop (matte light neutral, Y = TABLE_TOP_Y - TABLE_THICKNESS .. TABLE_TOP_Y)
-      const topMain = new THREE.CylinderGeometry(tr, tr - 0.025, TABLE_THICKNESS, segs);
-      transformGeometry(topMain, roomCenterX, TABLE_TOP_Y - TABLE_THICKNESS / 2, roomCenterZ);
-      kit.geo("desk", topMain, "furniture", 28);
+      const topGeo = new THREE.CylinderGeometry(tr, tr - 0.02, TABLE_THICKNESS, segs);
+      topGeo.translate(roomCenterX, TABLE_TOP_Y - TABLE_THICKNESS / 2, roomCenterZ);
+      addDynamicMesh(roomShellGroup, "meeting-circular-tabletop", topGeo, warmTableMat, false, true);
 
-      // Subtle architectural recessed brass/champagne-gold center cable inlay ring (completely flat)
-      const inlayR = Math.min(0.42, tr * 0.24);
-      const inlay = new THREE.CylinderGeometry(inlayR, inlayR, 0.006, 36);
-      transformGeometry(inlay, roomCenterX, TABLE_TOP_Y + 0.001, roomCenterZ);
-      kit.geo("accentGold", inlay, "detail", 32);
+      // Clean architectural outline around tabletop rim
+      const rimPts: number[] = [];
+      for (let i = 0; i < segs; i++) {
+        const a0 = (i / segs) * Math.PI * 2;
+        const a1 = ((i + 1) / segs) * Math.PI * 2;
+        rimPts.push(
+          roomCenterX + Math.cos(a0) * tr,
+          TABLE_TOP_Y + 0.001,
+          roomCenterZ + Math.sin(a0) * tr,
+          roomCenterX + Math.cos(a1) * tr,
+          TABLE_TOP_Y + 0.001,
+          roomCenterZ + Math.sin(a1) * tr,
+        );
+      }
+      const rimLines = materials.createLines("furniture", rimPts);
+      if (rimLines) {
+        dynamicDisposables.push(rimLines.geometry);
+        roomShellGroup.add(rimLines);
+      }
 
-      // Clean circular under-apron support
+      // Warm contrasting circular center inlay (matching reference table composition)
+      const inlayR = Math.min(0.46, tr * 0.28);
+      const inlayGeo = new THREE.CylinderGeometry(inlayR, inlayR, 0.006, 44);
+      inlayGeo.translate(roomCenterX, TABLE_TOP_Y + 0.001, roomCenterZ);
+      addDynamicMesh(roomShellGroup, "meeting-table-center-inlay", inlayGeo, warmInlayMat, false, true);
+
+      const inlayPts: number[] = [];
+      for (let i = 0; i < 44; i++) {
+        const a0 = (i / 44) * Math.PI * 2;
+        const a1 = ((i + 1) / 44) * Math.PI * 2;
+        inlayPts.push(
+          roomCenterX + Math.cos(a0) * inlayR,
+          TABLE_TOP_Y + 0.0045,
+          roomCenterZ + Math.sin(a0) * inlayR,
+          roomCenterX + Math.cos(a1) * inlayR,
+          TABLE_TOP_Y + 0.0045,
+          roomCenterZ + Math.sin(a1) * inlayR,
+        );
+      }
+      const inlayLines = materials.createLines("detail", inlayPts);
+      if (inlayLines) {
+        dynamicDisposables.push(inlayLines.geometry);
+        roomShellGroup.add(inlayLines);
+      }
+
+      // Central pedestal & under-apron
       const apron = new THREE.CylinderGeometry(tr * 0.72, tr * 0.72, 0.055, segs);
       transformGeometry(apron, roomCenterX, TABLE_TOP_Y - TABLE_THICKNESS - 0.025, roomCenterZ);
       kit.geo("chairBase", apron, null);
 
-      // Architectural central pedestal (fluted clean cylinder + grounded footplate; for huge tables add perimeter drum ring)
       const pedR = Math.max(0.28, tr * 0.22);
       const pedH = TABLE_TOP_Y - TABLE_THICKNESS - y0 - 0.04;
       const pedestal = new THREE.CylinderGeometry(pedR * 0.9, pedR, pedH, 32);
@@ -612,7 +952,7 @@ export function createVirtualMeetingRoom(
       transformGeometry(basePlate, roomCenterX, y0 + 0.016, roomCenterZ);
       kit.geo("chairBase", basePlate, "detail", 32);
 
-      // Soft contact shadow directly under circular table
+      // Soft contact shadow under table
       const shadowGeo = new THREE.PlaneGeometry(tr * 2.25, tr * 2.25);
       dynamicDisposables.push(shadowGeo);
       const shadowMat = materials.createContactShadow(0.14);
@@ -621,7 +961,42 @@ export function createVirtualMeetingRoom(
       shadowMesh.rotation.x = -Math.PI / 2;
       shadowMesh.position.set(roomCenterX, y0 + 0.002, roomCenterZ);
       shadowMesh.renderOrder = 1;
-      roomDynamicGroup.add(shadowMesh);
+      roomShellGroup.add(shadowMesh);
+
+      // ---- 6. Natural Tabletop Accessories: `</>` Programming Coffee Mug + Small Desk Plant ----
+      const mug = createProgrammingCoffeeMug();
+      // Placed cleanly in viewer's natural left foreground on the circular table, facing viewer (+Z)
+      mug.group.position.set(roomCenterX - 0.34, TABLE_TOP_Y, roomCenterZ + tr - 0.34);
+      mug.group.rotation.y = 0.16;
+      chairsAndPropsGroup.add(mug.group);
+      dynamicCleanups.push(() => mug.dispose());
+      hasProgrammingMug = true;
+
+      // Balanced small potted plant on right foreground of the circular table (compact, never obscures faces)
+      const tablePlantKit = new GeometryKit();
+      const tpx = roomCenterX + 0.38;
+      const tpz = roomCenterZ + tr - 0.34;
+      const miniPot = new THREE.CylinderGeometry(0.054, 0.042, 0.088, 16);
+      transformGeometry(miniPot, tpx, TABLE_TOP_Y + 0.044, tpz);
+      tablePlantKit.geo("clay", miniPot, "detail", 30);
+      for (let i = 0; i < 9; i++) {
+        const a = (i / 9) * Math.PI * 2 + 0.25;
+        const lh = 0.115 + (i % 2) * 0.035;
+        const lg = new THREE.ConeGeometry(0.026, lh, 5);
+        lg.scale(1.0, 1.0, 0.28);
+        lg.translate(0, lh * 0.5, 0);
+        lg.rotateX(0.42 + (i % 3) * 0.14);
+        lg.rotateY(a);
+        lg.translate(tpx, TABLE_TOP_Y + 0.082, tpz);
+        tablePlantKit.geo("plant", lg, null);
+      }
+      addDynamicMesh(chairsAndPropsGroup, "meeting-table-plant-pot", bucketToGeometry(tablePlantKit.buckets.clay), materials.clay, false, true);
+      addDynamicMesh(chairsAndPropsGroup, "meeting-table-plant-leaves", bucketToGeometry(tablePlantKit.buckets.plant), materials.plant, false, true);
+      const miniPotLines = materials.createLines("detail", tablePlantKit.lines.detail);
+      if (miniPotLines) {
+        dynamicDisposables.push(miniPotLines.geometry);
+        chairsAndPropsGroup.add(miniPotLines);
+      }
     }
 
     // Flush bucketed static meeting-room meshes & lines
@@ -640,7 +1015,7 @@ export function createVirtualMeetingRoom(
     ] as const;
     for (const kind of opaqueKinds) {
       addDynamicMesh(
-        roomDynamicGroup,
+        roomShellGroup,
         `meeting-${kind}`,
         bucketToGeometry(kit.buckets[kind]),
         materials.byKind[kind],
@@ -650,7 +1025,7 @@ export function createVirtualMeetingRoom(
       );
     }
     addDynamicMesh(
-      roomDynamicGroup,
+      roomShellGroup,
       "meeting-glass",
       bucketToGeometry(kit.buckets.glass),
       materials.glass,
@@ -664,25 +1039,29 @@ export function createVirtualMeetingRoom(
       const lineObj = materials.createLines(kind, kit.lines[kind]);
       if (lineObj) {
         dynamicDisposables.push(lineObj.geometry);
-        roomDynamicGroup.add(lineObj);
+        roomShellGroup.add(lineObj);
       }
     }
 
-    // ---- 6. Dynamically Arranged Conference Chairs + Demo Stickman Participants ----
+    // ---- 7. Participant Chairs, Low-Profile Laptops & Stickmen with Flat Circular Webcam Portraits ----
+    // CRITICAL: seatIdx starts at 1 so the local viewer's seat (0) NEVER renders a chair, avatar, or portrait!
     const totalSeats = layout.totalSeats;
     const chairR = layout.chairRadius;
+    const laptopR = layout.tableRadius - 0.13;
     const seatLinePositions: number[] = [];
+    const laptopLinePositions: number[] = [];
     const tmpVec = new THREE.Vector3();
 
-    for (let seatIdx = 0; seatIdx < totalSeats; seatIdx++) {
-      // Seat 0 = User's stationary chair at south (angle = 0 -> (centerX, centerZ + chairR), facing -Z).
-      // Seat 1 = Immediate LEFT neighbor; Seat totalSeats-1 = Immediate RIGHT neighbor.
+    let malePortraitCounter = 0;
+    let femalePortraitCounter = 0;
+
+    for (let seatIdx = 1; seatIdx < totalSeats; seatIdx++) {
       const theta = (2 * Math.PI * seatIdx) / totalSeats;
       const sx = roomCenterX - Math.sin(theta) * chairR;
       const sz = roomCenterZ + Math.cos(theta) * chairR;
       const faceCenterYaw = Math.atan2(roomCenterX - sx, roomCenterZ - sz);
 
-      // Place reusable low-profile conference chair
+      // Participant chair
       const chairGroup = new THREE.Group();
       chairGroup.name = `meeting-chair-${seatIdx}`;
       chairGroup.position.set(sx, y0, sz);
@@ -693,9 +1072,8 @@ export function createVirtualMeetingRoom(
       const baseMesh = new THREE.Mesh(chairProto.baseGeo, materials.chairBase);
       baseMesh.receiveShadow = true;
       chairGroup.add(seatMesh, baseMesh);
-      roomDynamicGroup.add(chairGroup);
+      chairsAndPropsGroup.add(chairGroup);
 
-      // Transform chair wireframe edges into world space so lines batch into a single draw call
       const cosY = Math.cos(faceCenterYaw);
       const sinY = Math.sin(faceCenterYaw);
       for (let i = 0; i < chairProto.linesGeo.length; i += 3) {
@@ -706,13 +1084,42 @@ export function createVirtualMeetingRoom(
         seatLinePositions.push(tmpVec.x, tmpVec.y, tmpVec.z);
       }
 
-      // Seat 0 belongs to the user; seats 1..participants.length hold demo stickmen
-      if (seatIdx > 0 && seatIdx <= participants.length) {
+      // Participant laptop cleanly placed on circular table in front of hands
+      if (seatIdx <= participants.length) {
+        const lx = roomCenterX - Math.sin(theta) * laptopR;
+        const lz = roomCenterZ + Math.cos(theta) * laptopR;
+        const laptopMesh = new THREE.Mesh(laptopProto.geo, materials.tech);
+        laptopMesh.name = `meeting-laptop-${seatIdx}`;
+        laptopMesh.position.set(lx, TABLE_TOP_Y, lz);
+        laptopMesh.rotation.y = faceCenterYaw;
+        chairsAndPropsGroup.add(laptopMesh);
+
+        for (let i = 0; i < laptopProto.lines.length; i += 3) {
+          const px = laptopProto.lines[i];
+          const py = laptopProto.lines[i + 1];
+          const pz = laptopProto.lines[i + 2];
+          tmpVec.set(lx + px * cosY + pz * sinY, TABLE_TOP_Y + py, lz - px * sinY + pz * cosY);
+          laptopLinePositions.push(tmpVec.x, tmpVec.y, tmpVec.z);
+        }
+
+        // 3D Stickman body + Flat 2D Circular Webcam Portrait replacing the original 3D head
         const spec = participants[seatIdx - 1];
         const inst = masterAssets.createInstance(spec.id, spec.variant, seatIdx * 1.37);
         inst.setPose("seated-meeting");
+        // Completely hide original 3D stickman head, eyes, smile, hair & bow
+        inst.setOriginalHeadVisible(false);
         inst.root.position.set(sx, y0, sz);
         inst.root.rotation.y = faceCenterYaw;
+
+        const portraitIdx = spec.variant === "male" ? malePortraitCounter++ : femalePortraitCounter++;
+        const portraitTex = portraitLibrary.getPortraitTexture(spec.variant, portraitIdx);
+        const portraitScale = totalSeats <= 10 ? 0.215 : 0.185;
+        const portraitBillboard = createWebcamPortraitBillboard(portraitTex, portraitScale, 0.015);
+        // Lift portrait center slightly above shoulder neck line so circular frame rests cleanly on top of neck
+        portraitBillboard.group.position.set(0, 0.045, 0);
+        inst.getWebcamMount().add(portraitBillboard.group);
+        portraitControllers.push(portraitBillboard);
+
         participantsGroup.add(inst.root);
         characters.push(inst);
       }
@@ -721,13 +1128,17 @@ export function createVirtualMeetingRoom(
     const chairLines = materials.createLines("furniture", seatLinePositions);
     if (chairLines) {
       dynamicDisposables.push(chairLines.geometry);
-      roomDynamicGroup.add(chairLines);
+      chairsAndPropsGroup.add(chairLines);
+    }
+    const laptopLines = materials.createLines("detail", laptopLinePositions);
+    if (laptopLines) {
+      dynamicDisposables.push(laptopLines.geometry);
+      chairsAndPropsGroup.add(laptopLines);
     }
 
     updateStatusText();
 
-    // If already seated in the meeting room when participant count changes, keep user smoothly seated at seat 0
-    if (active && !transitionState) {
+    if (active && !transitionState && focusState === "seated") {
       applySeatedCameraPose();
     }
   }
@@ -744,70 +1155,308 @@ export function createVirtualMeetingRoom(
     }
   }
 
-  function setStatusPillVisible(visible: boolean): void {
-    statusPillEl.classList.toggle("is-visible", visible);
-    statusPillEl.setAttribute("aria-hidden", String(!visible));
+  function updateDisplayHoverRaycast(): boolean {
+    if (!active || transitionState || focusState !== "seated") {
+      if (hoveredDisplay !== null) {
+        hoveredDisplay = null;
+        screenDisplay?.setHovered(false);
+        whiteboardDisplay?.setHovered(false);
+        syncContextualUI();
+        return true;
+      }
+      return false;
+    }
+
+    const targets: THREE.Object3D[] = [];
+    if (screenDisplay) targets.push(screenDisplay.hitMesh);
+    if (whiteboardDisplay) targets.push(whiteboardDisplay.hitMesh);
+    if (targets.length === 0) return false;
+
+    camera.updateMatrixWorld();
+
+    let nextHover: MeetingDisplayKind | null = null;
+    if (pointerTracked) {
+      raycaster.setFromCamera(pointerNdc, camera);
+      const hits = raycaster.intersectObjects(targets, false);
+      if (hits.length > 0) {
+        nextHover = (hits[0].object.userData.displayKind as MeetingDisplayKind) ?? null;
+      }
+    }
+
+    // Center-of-view fallback when steering programmatically without pointer inside canvas
+    if (!nextHover && !pointerTracked) {
+      raycaster.setFromCamera(new THREE.Vector2(0, 0.04), camera);
+      const hits = raycaster.intersectObjects(targets, false);
+      if (hits.length > 0) {
+        nextHover = (hits[0].object.userData.displayKind as MeetingDisplayKind) ?? null;
+      }
+    }
+
+    if (nextHover !== hoveredDisplay) {
+      hoveredDisplay = nextHover;
+      screenDisplay?.setHovered(nextHover === "screen");
+      whiteboardDisplay?.setHovered(nextHover === "whiteboard");
+      syncContextualUI();
+      return true;
+    }
+    return false;
   }
 
-  // ---- Seated Horizontal-Only Mouse & Keyboard Handlers ----
+  function computeDisplayZoomPose(display: MeetingWallDisplay): {
+    pos: THREE.Vector3;
+    quat: THREE.Quaternion;
+  } {
+    const vFovRad = THREE.MathUtils.degToRad(camera.fov);
+    const halfTanV = Math.tan(vFovRad / 2);
+    const halfTanH = halfTanV * Math.max(0.45, camera.aspect);
+    // Fill ~88-90% of viewport cleanly so entire display is readable & centered
+    const distV = (display.height / 2) / (halfTanV * 0.87);
+    const distH = (display.width / 2) / (halfTanH * 0.90);
+    const zoomDist = Math.max(distV, distH);
+
+    const pos = display.centerWorld.clone().add(new THREE.Vector3(0, 0, zoomDist));
+    const quat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0, "YXZ"));
+    return { pos, quat };
+  }
+
+  function startZoomToDisplay(kind: MeetingDisplayKind): void {
+    const display = getDisplayByKind(kind);
+    if (!display) return;
+
+    savedSeatedPos.copy(getUserEyePosition());
+    savedSeatedYaw = yaw;
+    focusedDisplay = kind;
+    hoveredDisplay = null;
+    screenDisplay?.setHovered(false);
+    whiteboardDisplay?.setHovered(false);
+    isDraggingLook = false;
+    activePointerId = null;
+    isDrawingStroke = false;
+    drawPointerId = null;
+    lastDrawUV = null;
+
+    // Hide participants & chairs cleanly so focused display is completely unobstructed
+    setParticipantsVisibleForFocus(false);
+
+    const targetPose = computeDisplayZoomPose(display);
+    focusState = "zooming-in";
+    zoomAnim = {
+      kind: "in",
+      elapsed: 0,
+      duration: ZOOM_TRANSITION_SEC,
+      fromPos: camera.position.clone(),
+      toPos: targetPose.pos,
+      fromQuat: camera.quaternion.clone(),
+      toQuat: targetPose.quat,
+    };
+    syncContextualUI();
+    forceRenderFlag = true;
+  }
+
+  function startReturnFromZoom(): void {
+    if (focusState === "seated") return;
+    isDrawingStroke = false;
+    drawPointerId = null;
+    lastDrawUV = null;
+
+    // Restore participants & chairs as camera pulls smoothly back to seated perspective
+    setParticipantsVisibleForFocus(true);
+
+    const seatedPos = getUserEyePosition();
+    const seatedQuat = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(LOCKED_PITCH, savedSeatedYaw, 0, "YXZ"),
+    );
+
+    focusState = "zooming-out";
+    zoomAnim = {
+      kind: "out",
+      elapsed: 0,
+      duration: ZOOM_TRANSITION_SEC * 0.92,
+      fromPos: camera.position.clone(),
+      toPos: seatedPos,
+      fromQuat: camera.quaternion.clone(),
+      toQuat: seatedQuat,
+    };
+    syncContextualUI();
+    forceRenderFlag = true;
+  }
+
+  function enterWhiteboardWritingMode(): void {
+    if (focusState !== "zoomed" || focusedDisplay !== "whiteboard") return;
+    focusState = "writing";
+    isDrawingStroke = false;
+    drawPointerId = null;
+    lastDrawUV = null;
+    syncContextualUI();
+    forceRenderFlag = true;
+  }
+
+  function raycastWhiteboardUV(clientX: number, clientY: number): { u: number; v: number } | null {
+    if (!whiteboardDisplay) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return null;
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    camera.updateMatrixWorld();
+    raycaster.setFromCamera(new THREE.Vector2(nx, ny), camera);
+    const hits = raycaster.intersectObject(whiteboardDisplay.hitMesh, false);
+    if (hits.length === 0 || !hits[0].uv) return null;
+    return { u: hits[0].uv.x, v: hits[0].uv.y };
+  }
+
+  // ---- Seated Horizontal-Only Mouse Look, Raycasting Targeting, Zoom & Whiteboard Writing Handlers ----
   const cleanups: Array<() => void> = [];
 
   const onPointerMove = (e: PointerEvent) => {
     if (!active || transitionState) return;
-    // STRICTLY HORIZONTAL: clientY / vertical movement is intentionally ignored
-    if (isDragging && activePointerId === e.pointerId) {
+
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width >= 10 && rect.height >= 10) {
+      pointerNdc.set(
+        THREE.MathUtils.clamp(((e.clientX - rect.left) / rect.width) * 2 - 1, -1, 1),
+        THREE.MathUtils.clamp(-(((e.clientY - rect.top) / rect.height) * 2 - 1), -1, 1),
+      );
+      pointerTracked = true;
+    }
+
+    // Whiteboard interactive writing stroke
+    if (focusState === "writing") {
+      if (isDrawingStroke && drawPointerId === e.pointerId && whiteboardDisplay) {
+        const uv = raycastWhiteboardUV(e.clientX, e.clientY);
+        if (uv) {
+          if (lastDrawUV) {
+            whiteboardDisplay.drawStrokeUV(lastDrawUV.u, lastDrawUV.v, uv.u, uv.v, activeMarkerColor, 5.2);
+          } else {
+            whiteboardDisplay.drawDotUV(uv.u, uv.v, activeMarkerColor, 5.2);
+          }
+          lastDrawUV = uv;
+          forceRenderFlag = true;
+        } else {
+          lastDrawUV = null;
+        }
+      }
+      return;
+    }
+
+    // Freeze camera movement while zoomed into a display
+    if (focusState !== "seated") return;
+
+    // STRICTLY HORIZONTAL mouse-look (vertical clientY never tilts seated camera)
+    if (isDraggingLook && activePointerId === e.pointerId) {
       const dx = e.clientX - lastPointerX;
       lastPointerX = e.clientX;
-      dragYawOffset = THREE.MathUtils.clamp(
-        dragYawOffset - dx * 0.0052,
-        -Math.PI,
-        Math.PI,
-      );
+      dragYawOffset = THREE.MathUtils.clamp(dragYawOffset - dx * 0.0052, -Math.PI, Math.PI);
       targetYaw = dragYawOffset + hoverYaw;
       return;
     }
 
-    const rect = canvas.getBoundingClientRect();
     if (rect.width < 10) return;
     const nx = THREE.MathUtils.clamp(((e.clientX - rect.left) / rect.width) * 2 - 1, -1, 1);
-    hoverYaw = -nx * getAdaptiveHoverYaw();
+    // Gentle center-stable curve so targeting either back-wall display stays rock-steady,
+    // while moving toward left/right edges smoothly turns all the way to immediate neighbors
+    const curvedX = Math.sign(nx) * Math.pow(Math.abs(nx), 1.65);
+    hoverYaw = -curvedX * getAdaptiveHoverYaw();
     targetYaw = dragYawOffset + hoverYaw;
+    updateDisplayHoverRaycast();
   };
 
   const onPointerDown = (e: PointerEvent) => {
     if (!active || transitionState || e.button !== 0) return;
-    isDragging = true;
+
+    if (focusState === "writing" && whiteboardDisplay) {
+      const uv = raycastWhiteboardUV(e.clientX, e.clientY);
+      if (uv) {
+        isDrawingStroke = true;
+        drawPointerId = e.pointerId;
+        lastDrawUV = uv;
+        whiteboardDisplay.drawDotUV(uv.u, uv.v, activeMarkerColor, 5.2);
+        canvas.setPointerCapture?.(e.pointerId);
+        forceRenderFlag = true;
+      }
+      return;
+    }
+
+    if (focusState !== "seated") return;
+    isDraggingLook = true;
     activePointerId = e.pointerId;
     lastPointerX = e.clientX;
     canvas.setPointerCapture?.(e.pointerId);
   };
 
   const onPointerUp = (e: PointerEvent) => {
-    if (activePointerId !== e.pointerId) return;
-    isDragging = false;
-    activePointerId = null;
-    if (canvas.hasPointerCapture?.(e.pointerId)) {
-      canvas.releasePointerCapture(e.pointerId);
+    if (drawPointerId === e.pointerId) {
+      isDrawingStroke = false;
+      drawPointerId = null;
+      lastDrawUV = null;
+      if (canvas.hasPointerCapture?.(e.pointerId)) {
+        canvas.releasePointerCapture(e.pointerId);
+      }
+    }
+    if (activePointerId === e.pointerId) {
+      isDraggingLook = false;
+      activePointerId = null;
+      if (canvas.hasPointerCapture?.(e.pointerId)) {
+        canvas.releasePointerCapture(e.pointerId);
+      }
     }
   };
 
+  const onPointerLeave = () => {
+    pointerTracked = false;
+    isDrawingStroke = false;
+    lastDrawUV = null;
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
-    if (!active) return;
+    if (!active || transitionState) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
-    // Exit meeting room cleanly via E or Escape
-    if (!e.repeat && (e.code === "Escape" || e.code === "KeyE" || e.key.toLowerCase() === "e")) {
+    // 1. Layered Esc handling: when zoomed or writing, Esc ONLY returns to seated view (never exits meeting!)
+    if (!e.repeat && e.code === "Escape") {
       e.preventDefault();
-      onRequestExit?.();
+      if (focusState !== "seated") {
+        startReturnFromZoom();
+      } else {
+        onRequestExit?.();
+      }
       return;
     }
 
-    // Block walking keys (WASD / Up / Down) so user remains strictly stationary in their chair
+    // 2. Press Z to Zoom into whichever back-wall display is currently targeted
+    if (!e.repeat && (e.code === "KeyZ" || e.key.toLowerCase() === "z")) {
+      if (focusState === "seated" && hoveredDisplay) {
+        e.preventDefault();
+        startZoomToDisplay(hoveredDisplay);
+      }
+      return;
+    }
+
+    // 3. Press A to enter Whiteboard Writing Mode (strictly ONLY when focused on whiteboard!)
+    if (!e.repeat && (e.code === "KeyA" || e.key.toLowerCase() === "a")) {
+      if (focusState === "zoomed" && focusedDisplay === "whiteboard") {
+        e.preventDefault();
+        enterWhiteboardWritingMode();
+        return;
+      }
+      // Block A from doing anything else in meeting mode
+      e.preventDefault();
+      return;
+    }
+
+    // 4. Press E to leave meeting room ONLY when in normal seated mode (not zoomed/writing)
+    if (!e.repeat && (e.code === "KeyE" || e.key.toLowerCase() === "e")) {
+      if (focusState === "seated") {
+        e.preventDefault();
+        onRequestExit?.();
+      }
+      return;
+    }
+
+    // 5. Block walking keys so user stays strictly stationary in their seated position
     if (
       e.code === "KeyW" ||
-      e.code === "KeyA" ||
       e.code === "KeyS" ||
       e.code === "KeyD" ||
       e.code === "ArrowUp" ||
@@ -816,26 +1465,31 @@ export function createVirtualMeetingRoom(
       e.code === "ArrowRight"
     ) {
       e.preventDefault();
-      // Allow subtle horizontal-only look via Left/Right arrows as an accessibility aid
-      if (e.code === "ArrowLeft") {
-        dragYawOffset = THREE.MathUtils.clamp(dragYawOffset + 0.16, -Math.PI, Math.PI);
-        targetYaw = dragYawOffset + hoverYaw;
-      } else if (e.code === "ArrowRight") {
-        dragYawOffset = THREE.MathUtils.clamp(dragYawOffset - 0.16, -Math.PI, Math.PI);
-        targetYaw = dragYawOffset + hoverYaw;
+      if (focusState === "seated") {
+        if (e.code === "ArrowLeft") {
+          dragYawOffset = THREE.MathUtils.clamp(dragYawOffset + 0.16, -Math.PI, Math.PI);
+          targetYaw = dragYawOffset + hoverYaw;
+        } else if (e.code === "ArrowRight") {
+          dragYawOffset = THREE.MathUtils.clamp(dragYawOffset - 0.16, -Math.PI, Math.PI);
+          targetYaw = dragYawOffset + hoverYaw;
+        }
       }
     }
   };
 
   const onBlur = () => {
-    isDragging = false;
+    isDraggingLook = false;
     activePointerId = null;
+    isDrawingStroke = false;
+    drawPointerId = null;
+    lastDrawUV = null;
   };
 
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("pointerleave", onPointerLeave);
   window.addEventListener("keydown", onKeyDown, { passive: false });
   window.addEventListener("blur", onBlur);
 
@@ -844,6 +1498,7 @@ export function createVirtualMeetingRoom(
     canvas.removeEventListener("pointerdown", onPointerDown);
     canvas.removeEventListener("pointerup", onPointerUp);
     canvas.removeEventListener("pointercancel", onPointerUp);
+    canvas.removeEventListener("pointerleave", onPointerLeave);
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("blur", onBlur);
   });
@@ -872,8 +1527,17 @@ export function createVirtualMeetingRoom(
       targetYaw = 0;
       hoverYaw = 0;
       dragYawOffset = 0;
-      isDragging = false;
+      isDraggingLook = false;
       activePointerId = null;
+      focusState = "seated";
+      focusedDisplay = null;
+      hoveredDisplay = null;
+      zoomAnim = null;
+      isDrawingStroke = false;
+      lastDrawUV = null;
+      setParticipantsVisibleForFocus(true);
+      screenDisplay?.setHovered(false);
+      whiteboardDisplay?.setHovered(false);
 
       const eye = getUserEyePosition();
       camera.fov = camera.aspect < 0.85 ? MEETING_PORTRAIT_FOV : MEETING_FOV;
@@ -895,12 +1559,28 @@ export function createVirtualMeetingRoom(
           toPitch: LOCKED_PITCH,
         };
       }
-      setStatusPillVisible(true);
+      syncContextualUI();
     },
     exit(toPosition, toYaw, toPitch, onComplete, immediate = false) {
-      isDragging = false;
+      isDraggingLook = false;
       activePointerId = null;
-      setStatusPillVisible(false);
+      isDrawingStroke = false;
+      drawPointerId = null;
+      lastDrawUV = null;
+      zoomAnim = null;
+      focusState = "seated";
+      focusedDisplay = null;
+      hoveredDisplay = null;
+      setParticipantsVisibleForFocus(true);
+      screenDisplay?.setHovered(false);
+      whiteboardDisplay?.setHovered(false);
+      statusPillEl.classList.remove("is-visible");
+      statusPillEl.setAttribute("aria-hidden", "true");
+      contextHintEl.classList.remove("is-visible");
+      contextHintEl.setAttribute("aria-hidden", "true");
+      wbToolbarEl.classList.remove("is-visible");
+      wbToolbarEl.setAttribute("aria-hidden", "true");
+      canvas.style.cursor = "";
 
       if (immediate || !active) {
         active = false;
@@ -931,40 +1611,48 @@ export function createVirtualMeetingRoom(
       targetYaw = clamped;
       hoverYaw = clamped;
       dragYawOffset = 0;
-      if (active && !transitionState) {
+      if (active && !transitionState && focusState === "seated") {
         applySeatedCameraPose();
+        updateDisplayHoverRaycast();
       }
     },
     steerCursorNormalized(nx, _ny = 0) {
-      // Explicitly ignore _ny to guarantee vertical input never tilts the camera
       const clampedX = THREE.MathUtils.clamp(nx, -1, 1);
       hoverYaw = -clampedX * getAdaptiveHoverYaw();
       targetYaw = dragYawOffset + hoverYaw;
     },
     resetView() {
+      if (focusState !== "seated") {
+        startReturnFromZoom();
+        return;
+      }
       yaw = 0;
       targetYaw = 0;
       hoverYaw = 0;
       dragYawOffset = 0;
       if (active && !transitionState) {
         applySeatedCameraPose();
+        updateDisplayHoverRaycast();
       }
     },
     update(timeSec, dtSec) {
-      // Animate seated meeting participants continuously when visible/active
-      if (active || transitionState) {
+      const dt = Math.min(0.05, Math.max(0.001, dtSec));
+
+      // Animate seated stickman bodies & keep all flat 2D circular webcam portraits facing the viewer
+      if ((active || transitionState) && participantsGroup.visible) {
         for (const ch of characters) {
           ch.update(timeSec);
         }
+        participantsGroup.updateWorldMatrix(true, true);
+        camera.updateMatrixWorld();
+        for (const pc of portraitControllers) {
+          pc.orientToCamera(camera);
+        }
       }
 
-      const dt = Math.min(0.05, Math.max(0.001, dtSec));
-
+      // 1. Enter / Exit meeting room camera transition
       if (transitionState) {
-        transitionState.elapsed = Math.min(
-          transitionState.duration,
-          transitionState.elapsed + dt,
-        );
+        transitionState.elapsed = Math.min(transitionState.duration, transitionState.elapsed + dt);
         const u = transitionState.elapsed / transitionState.duration;
         const ease = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
 
@@ -974,11 +1662,7 @@ export function createVirtualMeetingRoom(
         while (dYaw < -Math.PI) dYaw += Math.PI * 2;
 
         const curYaw = transitionState.fromYaw + dYaw * ease;
-        const curPitch = THREE.MathUtils.lerp(
-          transitionState.fromPitch,
-          transitionState.toPitch,
-          ease,
-        );
+        const curPitch = THREE.MathUtils.lerp(transitionState.fromPitch, transitionState.toPitch, ease);
         camera.rotation.order = "YXZ";
         camera.rotation.set(curPitch, curYaw, 0);
 
@@ -988,6 +1672,7 @@ export function createVirtualMeetingRoom(
           if (done.kind === "enter") {
             yaw = 0;
             applySeatedCameraPose();
+            syncContextualUI();
           } else {
             done.onComplete?.();
           }
@@ -997,25 +1682,93 @@ export function createVirtualMeetingRoom(
 
       if (!active) return false;
 
-      // Smooth damped horizontal-only viewing
+      // 2. Display zoom-in / zoom-out smooth interpolation
+      if (zoomAnim) {
+        zoomAnim.elapsed = Math.min(zoomAnim.duration, zoomAnim.elapsed + dt);
+        const u = zoomAnim.elapsed / zoomAnim.duration;
+        const ease = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+
+        camera.position.lerpVectors(zoomAnim.fromPos, zoomAnim.toPos, ease);
+        camera.quaternion.slerpQuaternions(zoomAnim.fromQuat, zoomAnim.toQuat, ease);
+
+        if (u >= 1) {
+          const finishedKind = zoomAnim.kind;
+          zoomAnim = null;
+          if (finishedKind === "in") {
+            focusState = "zoomed";
+          } else {
+            focusState = "seated";
+            focusedDisplay = null;
+            yaw = savedSeatedYaw;
+            applySeatedCameraPose();
+          }
+          syncContextualUI();
+        }
+        return true;
+      }
+
+      // 3. Zoomed or Whiteboard Writing static focused display pose (render strictly on-demand when drawing/resizing)
+      if (focusState === "zoomed" || focusState === "writing") {
+        const display = getDisplayByKind(focusedDisplay);
+        let moved = false;
+        if (display) {
+          const pose = computeDisplayZoomPose(display);
+          if (
+            camera.position.distanceToSquared(pose.pos) > 1e-6 ||
+            Math.abs(camera.quaternion.dot(pose.quat)) < 0.999999
+          ) {
+            camera.position.copy(pose.pos);
+            camera.quaternion.copy(pose.quat);
+            moved = true;
+          }
+        }
+        const need = forceRenderFlag || moved;
+        forceRenderFlag = false;
+        return need;
+      }
+
+      // 4. Normal Seated Mode: full-rate rendering during camera damping/hover/load; gentle cadence when idle
       const blend = 1 - Math.exp(-10.5 * dt);
       const diff = targetYaw - yaw;
+      let cameraMoved = false;
       if (Math.abs(diff) > 1e-4) {
         yaw += diff * blend;
-      } else {
+        cameraMoved = true;
+      } else if (yaw !== targetYaw) {
         yaw = targetYaw;
+        cameraMoved = true;
       }
       applySeatedCameraPose();
-      return true;
+      const hoverChanged = updateDisplayHoverRaycast();
+
+      // Re-orient portraits cleanly after final camera yaw update for zero 1-frame billboard lag
+      if (participantsGroup.visible) {
+        camera.updateMatrixWorld();
+        for (const pc of portraitControllers) {
+          pc.orientToCamera(camera);
+        }
+      }
+
+      const reducedMotion =
+        typeof window !== "undefined" &&
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      const idleTick = !reducedMotion && timeSec - lastIdleAnimSec >= 0.065;
+      if (idleTick) {
+        lastIdleAnimSec = timeSec;
+      }
+      const needRender = forceRenderFlag || cameraMoved || hoverChanged || idleTick;
+      forceRenderFlag = false;
+      return needRender;
     },
     getDiagnostics() {
       const eye = getUserEyePosition();
       const headWorld = new THREE.Vector3();
       const posDiff = camera.position.distanceTo(eye);
+      const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
 
       return {
         active,
-        transitioning: transitionState !== null,
+        transitioning: transitionState !== null || zoomAnim !== null,
         participantCount: participants.length,
         layout: { ...layout },
         cameraPosition: [
@@ -1023,17 +1776,25 @@ export function createVirtualMeetingRoom(
           +camera.position.y.toFixed(3),
           +camera.position.z.toFixed(3),
         ],
-        cameraYawDeg: +THREE.MathUtils.radToDeg(yaw).toFixed(2),
-        cameraPitchDeg: +THREE.MathUtils.radToDeg(camera.rotation.x).toFixed(2),
-        isPitchLocked: Math.abs(camera.rotation.x - LOCKED_PITCH) < 0.002,
-        isPositionStationary: active ? posDiff < 0.005 : true,
+        cameraYawDeg: +THREE.MathUtils.radToDeg(focusState === "seated" ? yaw : euler.y).toFixed(2),
+        cameraPitchDeg: +THREE.MathUtils.radToDeg(euler.x).toFixed(2),
+        isPitchLocked: focusState === "seated" ? Math.abs(euler.x - LOCKED_PITCH) < 0.002 : true,
+        isPositionStationary: active && focusState === "seated" ? posDiff < 0.005 : true,
+        focusState,
+        hoveredDisplay,
+        focusedDisplay,
+        displayCount: (screenDisplay ? 1 : 0) + (whiteboardDisplay ? 1 : 0),
+        hasProgrammingMug,
+        viewerChairHidden: chairsAndPropsGroup.getObjectByName("meeting-chair-0") === undefined,
+        portraitCount: portraitControllers.length,
+        allOriginalHeadsHidden: characters.every((ch) => !ch.getDiagnostics().originalHeadVisible),
+        whiteboardStrokeCount: whiteboardDisplay?.getUserStrokeCount() ?? 0,
         participants: characters.map((ch, idx) => {
           const seatIdx = idx + 1;
           const spec = participants[idx];
           ch.getHeadSocket().getWorldPosition(headWorld);
           const dx = headWorld.x - eye.x;
           const dz = headWorld.z - eye.z;
-          // Angle from straight ahead (-Z); positive = left (-X), negative = right (+X)
           const angleRad = Math.atan2(-dx, -dz);
           return {
             id: spec.id,
@@ -1057,7 +1818,15 @@ export function createVirtualMeetingRoom(
       cleanups.length = 0;
       clearDynamicBuild();
       chairProto.dispose();
+      laptopProto.dispose();
+      portraitLibrary.dispose();
+      warmTableMat.dispose();
+      warmInlayMat.dispose();
       statusPillEl.remove();
+      contextHintEl.remove();
+      wbToolbarEl.remove();
+      styleEl.remove();
+      canvas.style.cursor = "";
     },
   };
 }
