@@ -7,7 +7,8 @@ import { ArchitecturalRoom } from "./illustrations/ArchitecturalRoom";
 import { CharacterCutouts } from "./illustrations/CharacterCutouts";
 import { BookingSelection, type BookingDetails } from "./BookingSelection";
 import { DoorwayEntrance } from "./entrance/DoorwayEntrance";
-import type { AtriumSceneApi, AtriumViewMode } from "./entrance/types";
+import { MinimalistLoader } from "./MinimalistLoader";
+import type { AtriumLoadingPhase, AtriumSceneApi, AtriumViewMode } from "./entrance/types";
 
 gsap.registerPlugin(ScrollTrigger, useGSAP);
 
@@ -25,6 +26,7 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
   const [confirmation, setConfirmation] = useState("");
   const [entryDetails, setEntryDetails] = useState<BookingDetails | null>(null);
   const [entryReady, setEntryReady] = useState(false);
+  const [loadingPhase, setLoadingPhase] = useState<AtriumLoadingPhase>(null);
   const [viewMode, setViewMode] = useState<AtriumViewMode>("orbit");
   const [reducedMotion, setReducedMotion] = useState(false);
   const [entryFailed, setEntryFailed] = useState(false);
@@ -34,9 +36,14 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
   const activateEntry = useRef<((scene: AtriumSceneApi) => void) | null>(null);
   const resetEntry = useRef<(() => void) | null>(null);
 
+  const handleLoadingChange = useCallback((loading: boolean, phase: AtriumLoadingPhase) => {
+    setLoadingPhase(loading ? phase : null);
+  }, []);
+
   const handleSceneReady = useCallback((scene: AtriumSceneApi) => {
     sceneRef.current = scene;
     setEntryReady(true);
+    setLoadingPhase(null);
     setViewMode(scene.getMode());
     activateEntry.current?.(scene);
   }, []);
@@ -46,6 +53,7 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
     sceneRef.current = null;
     detailsRef.current = null;
     setEntryReady(false);
+    setLoadingPhase(null);
     setEntryDetails(null);
     setEntryFailed(true);
     setConfirmation("The 3D atrium could not load. Reload to try again.");
@@ -56,6 +64,7 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
     sceneRef.current = null;
     detailsRef.current = null;
     setEntryReady(false);
+    setLoadingPhase(null);
     setViewMode("orbit");
     setEntryDetails(null);
     setEntryFailed(false);
@@ -146,7 +155,7 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
               originX,
               originY,
               scale: Math.min(
-                2.6,
+                root.clientWidth < 640 ? 4.2 : 2.6,
                 Math.max(
                   1.25,
                   (root.clientHeight * 0.9) / (box.height * ratio),
@@ -398,14 +407,15 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
               alt="POV logo"
               width={568}
               height={365}
-              className="h-auto w-[54%] max-w-[258px] min-w-[156px] object-contain"
+              fetchPriority="high"
+              className="h-auto w-[58%] max-w-[258px] min-w-[144px] object-contain sm:w-[54%] sm:min-w-[156px]"
               draggable={false}
             />
             <h1
               data-hero-brand
               data-name="Brand / Slogan"
               className="mt-[2.2%] whitespace-nowrap font-normal tracking-[-0.018em] text-[#292B2E]"
-              style={{ fontSize: "clamp(1.12rem, 1.78vw, 1.82rem)", lineHeight: 1.2 }}
+              style={{ fontSize: "clamp(1.06rem, 1.78vw, 1.82rem)", lineHeight: 1.2 }}
             >
               We design experiences.
             </h1>
@@ -426,6 +436,7 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
           detailsRef.current = details;
           setEntryDetails(details);
           setEntryReady(false);
+          setLoadingPhase("world");
           setViewMode("orbit");
           setEntryFailed(false);
           setConfirmation(`Preparing the 3D atrium for you, ${details.name}…`);
@@ -478,11 +489,17 @@ export function PinnedBookingExperience({ children, onContinue }: PinnedBookingE
           <DoorwayEntrance
             reducedMotion={reducedMotion}
             onModeChange={setViewMode}
+            onLoadingChange={handleLoadingChange}
             onReady={handleSceneReady}
             onError={handleSceneError}
           />
         )}
       </div>
+
+      <MinimalistLoader
+        visible={loadingPhase !== null}
+        contextLabel={loadingPhase === "meeting" ? "Virtual meeting room" : "3D office atrium"}
+      />
       {entryDetails && (
         <div className="entrance-controls" data-name="Atrium / Controls">
           <button className="entrance-back" type="button" onClick={returnToSelection}>

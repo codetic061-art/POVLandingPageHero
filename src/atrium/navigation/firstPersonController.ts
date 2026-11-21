@@ -115,6 +115,8 @@ export class FirstPersonController {
   private transition: PoseTransition | null = null;
 
   private readonly activeDirs = new Set<MoveDir>();
+  private virtualMove = { forward: 0, strafe: 0 };
+  private touchLookPending = { dx: 0, dy: 0 };
   private dragging = false;
   private lastMouse = { x: 0, y: 0 };
   private touchLookId: number | null = null;
@@ -142,8 +144,20 @@ export class FirstPersonController {
     return this.poseLocked || Boolean(this.transition?.enteringPose);
   }
 
+  /**
+   * Feeds continuous normalized analog movement (-1..+1) from the mobile virtual joystick.
+   */
+  setVirtualMove(forward: number, strafe: number): void {
+    this.virtualMove.forward = THREE.MathUtils.clamp(forward, -1, 1);
+    this.virtualMove.strafe = THREE.MathUtils.clamp(strafe, -1, 1);
+  }
+
   clearInputState(): void {
     this.activeDirs.clear();
+    this.virtualMove.forward = 0;
+    this.virtualMove.strafe = 0;
+    this.touchLookPending.dx = 0;
+    this.touchLookPending.dy = 0;
     this.dragging = false;
     this.touchLookId = null;
     this.vel.x = 0;
@@ -447,17 +461,31 @@ export class FirstPersonController {
       return true;
     }
 
+    // Smoothly interpolate accumulated touch-drag look deltas for comfortable mobile camera rotation
+    if (Math.abs(this.touchLookPending.dx) > 0.05 || Math.abs(this.touchLookPending.dy) > 0.05) {
+      const lookBlend = 1 - Math.exp(-22 * dt);
+      const stepDx = this.touchLookPending.dx * lookBlend;
+      const stepDy = this.touchLookPending.dy * lookBlend;
+      this.touchLookPending.dx -= stepDx;
+      this.touchLookPending.dy -= stepDy;
+      this.rotateLook(stepDx, stepDy);
+    } else if (this.touchLookPending.dx !== 0 || this.touchLookPending.dy !== 0) {
+      this.rotateLook(this.touchLookPending.dx, this.touchLookPending.dy);
+      this.touchLookPending.dx = 0;
+      this.touchLookPending.dy = 0;
+    }
+
     if (!this.poseLocked) {
-      let fwd = 0;
-      let strafe = 0;
+      let fwd = this.virtualMove.forward;
+      let strafe = this.virtualMove.strafe;
       if (this.activeDirs.has("fwd")) fwd += 1;
       if (this.activeDirs.has("back")) fwd -= 1;
       if (this.activeDirs.has("right")) strafe += 1;
       if (this.activeDirs.has("left")) strafe -= 1;
 
       const moving =
-        fwd !== 0 ||
-        strafe !== 0 ||
+        Math.abs(fwd) > 0.01 ||
+        Math.abs(strafe) > 0.01 ||
         Math.hypot(this.vel.x, this.vel.z) > 0.005 ||
         Math.abs(this.feetY - this.smoothedFeetY) > 0.002;
       if (moving) {
@@ -560,10 +588,21 @@ export class FirstPersonController {
 
     const onTouchStart = (e: TouchEvent) => {
       if (!this.enabled || this.touchLookId !== null) return;
-      const t = e.changedTouches[0];
-      if (!t) return;
-      this.touchLookId = t.identifier;
-      this.lastTouch = { x: t.clientX, y: t.clientY };
+      // Only handle touches directly on the WebGL canvas (never UI buttons or virtual joystick)
+      if (e.target !== this.canvas) return;
+      const rect = this.canvas.getBoundingClientRect();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        // Reserve bottom-left thumb zone for the virtual joystick when standing
+        const inJoystickCorner =
+          !this.poseLocked &&
+          t.clientX < rect.left + Math.min(180, rect.width * 0.42) &&
+          t.clientY > rect.bottom - 220;
+        if (inJoystickCorner) continue;
+        this.touchLookId = t.identifier;
+        this.lastTouch = { x: t.clientX, y: t.clientY };
+        break;
+      }
     };
 
     const onTouchMove = (e: TouchEvent) => {
@@ -572,11 +611,12 @@ export class FirstPersonController {
         const t = e.changedTouches[i];
         if (t.identifier === this.touchLookId) {
           e.preventDefault();
-          this.rotateLook(
-            (t.clientX - this.lastTouch.x) * 1.35,
-            (t.clientY - this.lastTouch.y) * 1.35,
-          );
+          const dx = (t.clientX - this.lastTouch.x) * 1.45;
+          const dy = (t.clientY - this.lastTouch.y) * 1.25;
+          this.touchLookPending.dx += dx;
+          this.touchLookPending.dy += dy;
           this.lastTouch = { x: t.clientX, y: t.clientY };
+          this.renderDirty = true;
         }
       }
     };

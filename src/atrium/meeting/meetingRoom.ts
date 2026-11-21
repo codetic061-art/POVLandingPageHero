@@ -19,6 +19,7 @@ import {
   type WebcamPortraitController,
   type WhiteboardWallDisplay,
 } from "./meetingSurfaces";
+import { detectTouchEnvironment } from "../navigation/touchControls";
 
 export interface MeetingParticipantSpec {
   id: string;
@@ -79,6 +80,8 @@ export interface VirtualMeetingRoom {
   setParticipantCount: (count: number) => MeetingLayoutMetrics;
   getCharacters: () => StickmanInstance[];
   isActive: () => boolean;
+  prepareAssets: () => Promise<void>;
+  setTouchMode: (touch: boolean) => void;
   enter: (fromPosition: THREE.Vector3, fromYaw: number, fromPitch: number, immediate?: boolean) => void;
   exit: (
     toPosition: THREE.Vector3,
@@ -406,6 +409,81 @@ const SCOPED_MEETING_UI_CSS = `
 .meeting-wb-clear:hover {
   background: rgb(255 255 255 / 22%);
 }
+.meeting-touch-actions {
+  position: absolute;
+  top: max(18px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 42;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  max-width: calc(100vw - 24px);
+  flex-wrap: wrap;
+  pointer-events: none;
+  transform: translate(-50%, -6px);
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.meeting-touch-actions.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+.meeting-touch-btn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 10px 18px;
+  border: 1px solid rgb(186 214 245 / 48%);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgb(32 48 72 / 86%), rgb(20 32 52 / 82%));
+  box-shadow:
+    0 8px 22px rgb(16 28 48 / 26%),
+    0 0 18px rgb(86 144 232 / 24%),
+    inset 0 1px 0 rgb(255 255 255 / 24%);
+  backdrop-filter: blur(12px) saturate(135%);
+  -webkit-backdrop-filter: blur(12px) saturate(135%);
+  color: #ffffff;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 110ms ease, background-color 140ms ease;
+}
+.meeting-touch-btn:active {
+  transform: scale(0.96);
+}
+.meeting-touch-btn.is-primary {
+  border-color: rgb(135 190 255 / 72%);
+  background: linear-gradient(135deg, rgb(54 88 214 / 92%), rgb(42 66 168 / 88%));
+}
+@media (max-width: 639px) {
+  .meeting-wb-toolbar {
+    bottom: max(76px, calc(64px + env(safe-area-inset-bottom)));
+    padding: 8px 14px;
+    gap: 10px;
+  }
+  .meeting-wb-swatch {
+    width: 26px;
+    height: 26px;
+  }
+  .meeting-wb-clear {
+    min-height: 32px;
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+}
 `;
 
 /**
@@ -617,41 +695,144 @@ export function createVirtualMeetingRoom(
   wbToolbarEl.append(clearBtn);
   host.append(wbToolbarEl);
 
+  // Contextual touchscreen action buttons (visible ONLY on touch devices when actions are available)
+  let touchMode = detectTouchEnvironment();
+  let lastTouchActionAt = 0;
+  const runTouchGuarded = (fn: () => void) => {
+    const now = performance.now();
+    if (now - lastTouchActionAt < 260) return;
+    lastTouchActionAt = now;
+    fn();
+  };
+
+  const touchActionsEl = document.createElement("div");
+  touchActionsEl.className = "meeting-touch-actions";
+  touchActionsEl.setAttribute("data-name", "Meeting Room / Touch actions");
+  touchActionsEl.setAttribute("aria-hidden", "true");
+
+  const touchZoomBtn = document.createElement("button");
+  touchZoomBtn.type = "button";
+  touchZoomBtn.className = "meeting-touch-btn is-primary";
+  touchZoomBtn.setAttribute("data-touch-action", "zoom");
+  touchZoomBtn.textContent = "Tap to Zoom";
+  touchZoomBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    runTouchGuarded(() => {
+      if (focusState === "seated" && hoveredDisplay) {
+        startZoomToDisplay(hoveredDisplay);
+      }
+    });
+  });
+
+  const touchWriteBtn = document.createElement("button");
+  touchWriteBtn.type = "button";
+  touchWriteBtn.className = "meeting-touch-btn is-primary";
+  touchWriteBtn.setAttribute("data-touch-action", "write");
+  touchWriteBtn.textContent = "Tap to Write";
+  touchWriteBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    runTouchGuarded(() => {
+      if (focusState === "zoomed" && focusedDisplay === "whiteboard") {
+        enterWhiteboardWritingMode();
+      }
+    });
+  });
+
+  const touchReturnBtn = document.createElement("button");
+  touchReturnBtn.type = "button";
+  touchReturnBtn.className = "meeting-touch-btn";
+  touchReturnBtn.setAttribute("data-touch-action", "return");
+  touchReturnBtn.textContent = "Tap to Return";
+  touchReturnBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    runTouchGuarded(() => {
+      if (focusState !== "seated") {
+        startReturnFromZoom();
+      }
+    });
+  });
+
+  const touchLeaveBtn = document.createElement("button");
+  touchLeaveBtn.type = "button";
+  touchLeaveBtn.className = "meeting-touch-btn";
+  touchLeaveBtn.setAttribute("data-touch-action", "leave");
+  touchLeaveBtn.textContent = "Tap to Leave";
+  touchLeaveBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    runTouchGuarded(() => {
+      if (focusState === "seated") {
+        onRequestExit?.();
+      }
+    });
+  });
+
+  touchActionsEl.append(touchZoomBtn, touchWriteBtn, touchReturnBtn, touchLeaveBtn);
+  host.append(touchActionsEl);
+
   let lastHintMarkup = "";
   function syncContextualUI(): void {
     if (!active || transitionState) {
       contextHintEl.classList.remove("is-visible");
       contextHintEl.setAttribute("aria-hidden", "true");
+      touchActionsEl.classList.remove("is-visible");
+      touchActionsEl.setAttribute("aria-hidden", "true");
       wbToolbarEl.classList.remove("is-visible");
       wbToolbarEl.setAttribute("aria-hidden", "true");
       canvas.style.cursor = "";
       return;
     }
 
-    const showStatus = focusState === "seated";
+    const showStatus = focusState === "seated" && !touchMode;
     statusPillEl.classList.toggle("is-visible", showStatus);
     statusPillEl.setAttribute("aria-hidden", String(!showStatus));
 
-    let hintMarkup = "";
-    if (focusState === "seated" && hoveredDisplay) {
-      hintMarkup = `Press <kbd>Z</kbd> to Zoom`;
-    } else if (focusState === "zoomed" || focusState === "zooming-in") {
-      if (focusedDisplay === "whiteboard") {
-        hintMarkup = `Press <kbd>A</kbd> to Write &nbsp;·&nbsp; Press <kbd>Esc</kbd> to Return`;
-      } else {
-        hintMarkup = `Press <kbd>Esc</kbd> to Return`;
-      }
-    } else if (focusState === "writing") {
-      hintMarkup = `Drag on Whiteboard to Write &nbsp;·&nbsp; Press <kbd>Esc</kbd> to Return`;
-    }
+    if (touchMode) {
+      // Hide desktop keyboard hint pill; show ONLY currently available single-tap touch buttons
+      contextHintEl.classList.remove("is-visible");
+      contextHintEl.setAttribute("aria-hidden", "true");
 
-    if (hintMarkup !== lastHintMarkup) {
-      lastHintMarkup = hintMarkup;
-      contextHintEl.innerHTML = hintMarkup;
+      const canZoom = focusState === "seated" && hoveredDisplay !== null;
+      const canWrite = focusState === "zoomed" && focusedDisplay === "whiteboard";
+      const canReturn = focusState === "zoomed" || focusState === "writing" || focusState === "zooming-in";
+      const canLeave = focusState === "seated";
+
+      touchZoomBtn.style.display = canZoom ? "inline-flex" : "none";
+      if (canZoom) {
+        touchZoomBtn.textContent =
+          hoveredDisplay === "whiteboard" ? "Tap to Zoom · Whiteboard" : "Tap to Zoom · Screen";
+      }
+      touchWriteBtn.style.display = canWrite ? "inline-flex" : "none";
+      touchReturnBtn.style.display = canReturn ? "inline-flex" : "none";
+      touchLeaveBtn.style.display = canLeave ? "inline-flex" : "none";
+
+      const anyTouchAction = canZoom || canWrite || canReturn || canLeave;
+      touchActionsEl.classList.toggle("is-visible", anyTouchAction);
+      touchActionsEl.setAttribute("aria-hidden", String(!anyTouchAction));
+    } else {
+      touchActionsEl.classList.remove("is-visible");
+      touchActionsEl.setAttribute("aria-hidden", "true");
+
+      let hintMarkup = "";
+      if (focusState === "seated" && hoveredDisplay) {
+        hintMarkup = `Press <kbd>Z</kbd> to Zoom`;
+      } else if (focusState === "zoomed" || focusState === "zooming-in") {
+        if (focusedDisplay === "whiteboard") {
+          hintMarkup = `Press <kbd>A</kbd> to Write &nbsp;·&nbsp; Press <kbd>Esc</kbd> to Return`;
+        } else {
+          hintMarkup = `Press <kbd>Esc</kbd> to Return`;
+        }
+      } else if (focusState === "writing") {
+        hintMarkup = `Drag on Whiteboard to Write &nbsp;·&nbsp; Press <kbd>Esc</kbd> to Return`;
+      }
+
+      if (hintMarkup !== lastHintMarkup) {
+        lastHintMarkup = hintMarkup;
+        contextHintEl.innerHTML = hintMarkup;
+      }
+      const hintVisible = hintMarkup.length > 0;
+      contextHintEl.classList.toggle("is-visible", hintVisible);
+      contextHintEl.setAttribute("aria-hidden", String(!hintVisible));
     }
-    const hintVisible = hintMarkup.length > 0;
-    contextHintEl.classList.toggle("is-visible", hintVisible);
-    contextHintEl.setAttribute("aria-hidden", String(!hintVisible));
 
     const writingNow = focusState === "writing";
     wbToolbarEl.classList.toggle("is-visible", writingNow);
@@ -1175,7 +1356,9 @@ export function createVirtualMeetingRoom(
     camera.updateMatrixWorld();
 
     let nextHover: MeetingDisplayKind | null = null;
-    if (pointerTracked) {
+    if (touchMode && touchSelectedDisplay) {
+      nextHover = touchSelectedDisplay;
+    } else if (pointerTracked) {
       raycaster.setFromCamera(pointerNdc, camera);
       const hits = raycaster.intersectObjects(targets, false);
       if (hits.length > 0) {
@@ -1183,8 +1366,8 @@ export function createVirtualMeetingRoom(
       }
     }
 
-    // Center-of-view fallback when steering programmatically without pointer inside canvas
-    if (!nextHover && !pointerTracked) {
+    // Center-of-view fallback when steering via touch-drag or keyboard without mouse pointer
+    if (!nextHover && (!pointerTracked || touchMode)) {
       raycaster.setFromCamera(new THREE.Vector2(0, 0.04), camera);
       const hits = raycaster.intersectObjects(targets, false);
       if (hits.length > 0) {
@@ -1307,11 +1490,47 @@ export function createVirtualMeetingRoom(
   // ---- Seated Horizontal-Only Mouse Look, Raycasting Targeting, Zoom & Whiteboard Writing Handlers ----
   const cleanups: Array<() => void> = [];
 
+  let pointerDownX = 0;
+  let pointerDownY = 0;
+  let pointerMovedDist = 0;
+  let touchSelectedDisplay: MeetingDisplayKind | null = null;
+
+  const raycastDisplayAtClient = (clientX: number, clientY: number): MeetingDisplayKind | null => {
+    const targets: THREE.Object3D[] = [];
+    if (screenDisplay) targets.push(screenDisplay.hitMesh);
+    if (whiteboardDisplay) targets.push(whiteboardDisplay.hitMesh);
+    if (targets.length === 0) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return null;
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    camera.updateMatrixWorld();
+    raycaster.setFromCamera(new THREE.Vector2(nx, ny), camera);
+    const hits = raycaster.intersectObjects(targets, false);
+    if (hits.length === 0) return null;
+    return (hits[0].object.userData.displayKind as MeetingDisplayKind) ?? null;
+  };
+
+  const setHoveredDisplayDirect = (next: MeetingDisplayKind | null) => {
+    if (next === hoveredDisplay) return;
+    hoveredDisplay = next;
+    screenDisplay?.setHovered(next === "screen");
+    whiteboardDisplay?.setHovered(next === "whiteboard");
+    syncContextualUI();
+    forceRenderFlag = true;
+  };
+
   const onPointerMove = (e: PointerEvent) => {
     if (!active || transitionState) return;
 
+    const isTouch = e.pointerType === "touch";
+    if (isTouch && !touchMode) {
+      touchMode = true;
+      syncContextualUI();
+    }
+
     const rect = canvas.getBoundingClientRect();
-    if (rect.width >= 10 && rect.height >= 10) {
+    if (!isTouch && rect.width >= 10 && rect.height >= 10) {
       pointerNdc.set(
         THREE.MathUtils.clamp(((e.clientX - rect.left) / rect.width) * 2 - 1, -1, 1),
         THREE.MathUtils.clamp(-(((e.clientY - rect.top) / rect.height) * 2 - 1), -1, 1),
@@ -1319,7 +1538,7 @@ export function createVirtualMeetingRoom(
       pointerTracked = true;
     }
 
-    // Whiteboard interactive writing stroke
+    // Whiteboard interactive writing stroke (works identically for mouse & touch!)
     if (focusState === "writing") {
       if (isDrawingStroke && drawPointerId === e.pointerId && whiteboardDisplay) {
         const uv = raycastWhiteboardUV(e.clientX, e.clientY);
@@ -1341,14 +1560,25 @@ export function createVirtualMeetingRoom(
     // Freeze camera movement while zoomed into a display
     if (focusState !== "seated") return;
 
-    // STRICTLY HORIZONTAL mouse-look (vertical clientY never tilts seated camera)
+    // STRICTLY HORIZONTAL drag viewing (mouse drag OR touch drag; vertical movement never tilts seated camera)
     if (isDraggingLook && activePointerId === e.pointerId) {
       const dx = e.clientX - lastPointerX;
       lastPointerX = e.clientX;
-      dragYawOffset = THREE.MathUtils.clamp(dragYawOffset - dx * 0.0052, -Math.PI, Math.PI);
-      targetYaw = dragYawOffset + hoverYaw;
+      pointerMovedDist += Math.hypot(e.clientX - pointerDownX, e.clientY - pointerDownY);
+      const dragSens = isTouch ? 0.0058 : 0.0052;
+      const maxAngle = isTouch ? getAdaptiveHoverYaw() + THREE.MathUtils.degToRad(18) : Math.PI;
+      dragYawOffset = THREE.MathUtils.clamp(dragYawOffset - dx * dragSens, -maxAngle, maxAngle);
+      targetYaw = dragYawOffset + (isTouch ? 0 : hoverYaw);
+      if (isTouch && Math.abs(dx) > 1.5) {
+        touchSelectedDisplay = null;
+        pointerTracked = false;
+      }
+      forceRenderFlag = true;
       return;
     }
+
+    // Touch devices do not hover-pan without dragging
+    if (isTouch) return;
 
     if (rect.width < 10) return;
     const nx = THREE.MathUtils.clamp(((e.clientX - rect.left) / rect.width) * 2 - 1, -1, 1);
@@ -1361,7 +1591,11 @@ export function createVirtualMeetingRoom(
   };
 
   const onPointerDown = (e: PointerEvent) => {
-    if (!active || transitionState || e.button !== 0) return;
+    if (!active || transitionState || (e.pointerType !== "touch" && e.button !== 0)) return;
+    if (e.pointerType === "touch" && !touchMode) {
+      touchMode = true;
+      syncContextualUI();
+    }
 
     if (focusState === "writing" && whiteboardDisplay) {
       const uv = raycastWhiteboardUV(e.clientX, e.clientY);
@@ -1380,6 +1614,9 @@ export function createVirtualMeetingRoom(
     isDraggingLook = true;
     activePointerId = e.pointerId;
     lastPointerX = e.clientX;
+    pointerDownX = e.clientX;
+    pointerDownY = e.clientY;
+    pointerMovedDist = 0;
     canvas.setPointerCapture?.(e.pointerId);
   };
 
@@ -1393,10 +1630,16 @@ export function createVirtualMeetingRoom(
       }
     }
     if (activePointerId === e.pointerId) {
+      const wasTap = e.pointerType === "touch" && pointerMovedDist < 16 && focusState === "seated";
       isDraggingLook = false;
       activePointerId = null;
       if (canvas.hasPointerCapture?.(e.pointerId)) {
         canvas.releasePointerCapture(e.pointerId);
+      }
+      if (wasTap) {
+        const hit = raycastDisplayAtClient(e.clientX, e.clientY);
+        touchSelectedDisplay = hit;
+        setHoveredDisplayDirect(hit);
       }
     }
   };
@@ -1521,6 +1764,14 @@ export function createVirtualMeetingRoom(
     },
     getCharacters: () => characters,
     isActive: () => active,
+    prepareAssets() {
+      return portraitLibrary.preloadAll();
+    },
+    setTouchMode(touch) {
+      if (touchMode === touch) return;
+      touchMode = touch;
+      syncContextualUI();
+    },
     enter(fromPosition, fromYaw, fromPitch, immediate = false) {
       active = true;
       yaw = 0;
@@ -1532,6 +1783,7 @@ export function createVirtualMeetingRoom(
       focusState = "seated";
       focusedDisplay = null;
       hoveredDisplay = null;
+      touchSelectedDisplay = null;
       zoomAnim = null;
       isDrawingStroke = false;
       lastDrawUV = null;
@@ -1571,6 +1823,7 @@ export function createVirtualMeetingRoom(
       focusState = "seated";
       focusedDisplay = null;
       hoveredDisplay = null;
+      touchSelectedDisplay = null;
       setParticipantsVisibleForFocus(true);
       screenDisplay?.setHovered(false);
       whiteboardDisplay?.setHovered(false);
@@ -1578,6 +1831,8 @@ export function createVirtualMeetingRoom(
       statusPillEl.setAttribute("aria-hidden", "true");
       contextHintEl.classList.remove("is-visible");
       contextHintEl.setAttribute("aria-hidden", "true");
+      touchActionsEl.classList.remove("is-visible");
+      touchActionsEl.setAttribute("aria-hidden", "true");
       wbToolbarEl.classList.remove("is-visible");
       wbToolbarEl.setAttribute("aria-hidden", "true");
       canvas.style.cursor = "";
@@ -1824,6 +2079,7 @@ export function createVirtualMeetingRoom(
       warmInlayMat.dispose();
       statusPillEl.remove();
       contextHintEl.remove();
+      touchActionsEl.remove();
       wbToolbarEl.remove();
       styleEl.remove();
       canvas.style.cursor = "";

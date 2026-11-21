@@ -19,20 +19,42 @@ const FEMALE_PORTRAIT_URLS = [portraitFemale1Url, portraitFemale2Url] as const;
 export class MeetingPortraitLibrary {
   private readonly loader = new THREE.TextureLoader();
   private readonly cache = new Map<string, THREE.Texture>();
+  private readonly loadPromises = new Map<string, Promise<void>>();
   private readonly onTextureLoaded?: () => void;
 
   constructor(onTextureLoaded?: () => void) {
     this.onTextureLoaded = onTextureLoaded;
   }
 
-  getPortraitTexture(variant: StickmanVariant, index: number): THREE.Texture {
-    const pool = variant === "male" ? MALE_PORTRAIT_URLS : FEMALE_PORTRAIT_URLS;
-    const url = pool[index % pool.length];
+  private ensureLoaded(url: string): THREE.Texture {
     let tex = this.cache.get(url);
     if (!tex) {
-      tex = this.loader.load(url, () => {
-        this.onTextureLoaded?.();
+      let resolveLoad!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        resolveLoad = resolve;
       });
+      this.loadPromises.set(url, promise);
+
+      tex = this.loader.load(
+        url,
+        (loadedTex) => {
+          const img = loadedTex.image as HTMLImageElement | undefined;
+          if (img && typeof img.decode === "function") {
+            void img.decode().catch(() => {}).finally(() => {
+              this.onTextureLoaded?.();
+              resolveLoad();
+            });
+          } else {
+            this.onTextureLoaded?.();
+            resolveLoad();
+          }
+        },
+        undefined,
+        () => {
+          // Resolve gracefully on asset error so loader never stalls indefinitely
+          resolveLoad();
+        },
+      );
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.minFilter = THREE.LinearMipmapLinearFilter;
       tex.magFilter = THREE.LinearFilter;
@@ -42,11 +64,29 @@ export class MeetingPortraitLibrary {
     return tex;
   }
 
+  getPortraitTexture(variant: StickmanVariant, index: number): THREE.Texture {
+    const pool = variant === "male" ? MALE_PORTRAIT_URLS : FEMALE_PORTRAIT_URLS;
+    const url = pool[index % pool.length];
+    return this.ensureLoaded(url);
+  }
+
+  /**
+   * Resolves once all currently required meeting portrait textures have finished loading & decoding.
+   */
+  preloadAll(): Promise<void> {
+    const allUrls = [...MALE_PORTRAIT_URLS, ...FEMALE_PORTRAIT_URLS];
+    for (const url of allUrls) {
+      this.ensureLoaded(url);
+    }
+    return Promise.all(this.loadPromises.values()).then(() => undefined);
+  }
+
   dispose(): void {
     for (const tex of this.cache.values()) {
       tex.dispose();
     }
     this.cache.clear();
+    this.loadPromises.clear();
   }
 }
 

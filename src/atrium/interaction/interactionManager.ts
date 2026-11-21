@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { ATRIUM_CONFIG } from "../config";
 import type { FirstPersonController } from "../navigation/firstPersonController";
+import { detectTouchEnvironment } from "../navigation/touchControls";
 
 export type InteractionTargetConfig = (typeof ATRIUM_CONFIG.interactions.targets)[number];
 
@@ -18,7 +19,7 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 /**
  * Manages proximity detection, 1-second Hold-E circular progress ring (for selected
  * chairs/desks), instant Press-E entry for the upper-floor Meeting Room door,
- * and 3D-projected floating Glassmorphism prompt.
+ * 3D-projected floating Glassmorphism prompt, and single-tap touchscreen alternatives.
  */
 export class AtriumInteractionManager {
   private readonly host: HTMLDivElement;
@@ -30,22 +31,25 @@ export class AtriumInteractionManager {
   private readonly transitionDuration = ATRIUM_CONFIG.interactions.transitionDurationSec;
 
   // Reusable single DOM nodes (zero per-frame DOM allocations)
-  private readonly promptEl: HTMLDivElement;
+  private readonly promptEl: HTMLButtonElement;
+  private readonly keyCapEl: HTMLSpanElement;
   private readonly titleEl: HTMLSpanElement;
   private readonly subtitleEl: HTMLSpanElement;
   private readonly ringProgressEl: SVGCircleElement;
-  private readonly statusPillEl: HTMLDivElement;
+  private readonly statusPillEl: HTMLButtonElement;
   private readonly statusTextEl: HTMLSpanElement;
 
   private readonly projVec = new THREE.Vector3();
   private enabled = false;
+  private touchMode = detectTouchEnvironment();
+  private lastTapAt = 0;
   private nearestTarget: InteractionTargetConfig | null = null;
   private activeTarget: InteractionTargetConfig | null = null;
   private holdingE = false;
   private waitReleaseAfterActivate = false;
   private holdProgress = 0;
   private promptVisible = false;
-  private lastShownTargetId: string | null = null;
+  private lastShownKey = "";
   private lastTransform = "";
   private readonly cleanups: Array<() => void> = [];
 
@@ -60,8 +64,9 @@ export class AtriumInteractionManager {
     this.fpController = fpController;
     this.onEnterMeetingRoom = onEnterMeetingRoom;
 
-    // 1. Floating 3D-projected Glassmorphism prompt
-    this.promptEl = document.createElement("div");
+    // 1. Floating 3D-projected Glassmorphism prompt (interactive single-tap button on touch devices)
+    this.promptEl = document.createElement("button");
+    this.promptEl.type = "button";
     this.promptEl.className = "atrium-interaction-prompt";
     this.promptEl.setAttribute("data-name", "Atrium / Interaction prompt");
     this.promptEl.setAttribute("aria-live", "polite");
@@ -91,11 +96,11 @@ export class AtriumInteractionManager {
 
     svg.append(track, this.ringProgressEl);
 
-    const keyCap = document.createElement("span");
-    keyCap.className = "atrium-key-letter";
-    keyCap.textContent = "E";
+    this.keyCapEl = document.createElement("span");
+    this.keyCapEl.className = "atrium-key-letter";
+    this.keyCapEl.textContent = "E";
 
-    keyWrap.append(svg, keyCap);
+    keyWrap.append(svg, this.keyCapEl);
 
     const textWrap = document.createElement("div");
     textWrap.className = "atrium-prompt-copy";
@@ -112,8 +117,9 @@ export class AtriumInteractionManager {
     this.promptEl.append(keyWrap, textWrap);
     this.host.append(this.promptEl);
 
-    // 2. Minimal Glassmorphism active-state pill (shown while seated or focusing a desk)
-    this.statusPillEl = document.createElement("div");
+    // 2. Minimal Glassmorphism active-state pill (tappable exit button on touch devices)
+    this.statusPillEl = document.createElement("button");
+    this.statusPillEl.type = "button";
     this.statusPillEl.className = "atrium-active-pill";
     this.statusPillEl.setAttribute("data-name", "Atrium / Seated status");
     this.statusPillEl.setAttribute("aria-hidden", "true");
@@ -128,7 +134,46 @@ export class AtriumInteractionManager {
     this.statusPillEl.append(pillDot, this.statusTextEl);
     this.host.append(this.statusPillEl);
 
+    this.syncTouchClasses();
     this.bindEvents();
+  }
+
+  setTouchMode(touch: boolean): void {
+    if (this.touchMode === touch) return;
+    this.touchMode = touch;
+    this.lastShownKey = "";
+    this.syncTouchClasses();
+    if (this.activeTarget) {
+      this.statusTextEl.textContent = this.formatActiveLabel(this.activeTarget);
+    }
+  }
+
+  private syncTouchClasses(): void {
+    this.promptEl.classList.toggle("is-touch", this.touchMode);
+    this.statusPillEl.classList.toggle("is-touch", this.touchMode);
+  }
+
+  private formatActiveLabel(target: InteractionTargetConfig): string {
+    if (!this.touchMode) return target.activeLabel;
+    if (target.kind === "chair") return "Seated · Tap to Stand";
+    return "Focused · Tap to Return";
+  }
+
+  private formatPromptCopy(target: InteractionTargetConfig): {
+    badge: string;
+    title: string;
+    subtitle: string;
+  } {
+    if (!this.touchMode) {
+      return { badge: "E", title: target.title, subtitle: target.subtitle };
+    }
+    if (target.kind === "door") {
+      return { badge: "Tap", title: "Tap to Enter", subtitle: "Virtual Meeting Room" };
+    }
+    if (target.kind === "chair") {
+      return { badge: "Tap", title: "Tap to Sit", subtitle: "Have a seat" };
+    }
+    return { badge: "Tap", title: "Tap to Focus", subtitle: target.title };
   }
 
   setEnabled(enabled: boolean): void {
@@ -260,11 +305,14 @@ export class AtriumInteractionManager {
       return false;
     }
 
-    // Update prompt label only when target changes
-    if (this.lastShownTargetId !== bestTarget.id) {
-      this.lastShownTargetId = bestTarget.id;
-      this.titleEl.textContent = bestTarget.title;
-      this.subtitleEl.textContent = bestTarget.subtitle;
+    // Update prompt label only when target or touch mode changes
+    const shownKey = `${bestTarget.id}:${this.touchMode ? "t" : "k"}`;
+    if (this.lastShownKey !== shownKey) {
+      this.lastShownKey = shownKey;
+      const copy = this.formatPromptCopy(bestTarget);
+      this.keyCapEl.textContent = copy.badge;
+      this.titleEl.textContent = copy.title;
+      this.subtitleEl.textContent = copy.subtitle;
     }
 
     // Advance or smoothly reset the 1-second hold-E progress ring
@@ -306,9 +354,11 @@ export class AtriumInteractionManager {
 
     const rawX = (this.projVec.x * 0.5 + 0.5) * w;
     const rawY = (-this.projVec.y * 0.5 + 0.5) * h;
-    // Keep indicator comfortably inside viewport bounds so it never clips or blocks bottom controls
-    const clampedX = THREE.MathUtils.clamp(rawX, 118, w - 118);
-    const clampedY = THREE.MathUtils.clamp(rawY, 76, h - 104);
+    // Keep indicator comfortably inside viewport bounds so it never clips or blocks bottom controls/joystick
+    const padX = Math.min(118, w * 0.34);
+    const padBottom = this.touchMode ? 124 : 104;
+    const clampedX = THREE.MathUtils.clamp(rawX, padX, w - padX);
+    const clampedY = THREE.MathUtils.clamp(rawY, 76, h - padBottom);
 
     const nextTransform = `translate3d(${clampedX.toFixed(1)}px, ${clampedY.toFixed(1)}px, 0) translate(-50%, -100%)`;
     if (nextTransform !== this.lastTransform) {
@@ -334,7 +384,7 @@ export class AtriumInteractionManager {
     }
 
     this.activeTarget = target;
-    this.statusTextEl.textContent = target.activeLabel;
+    this.statusTextEl.textContent = this.formatActiveLabel(target);
     this.statusPillEl.classList.add("is-visible");
     this.statusPillEl.setAttribute("aria-hidden", "false");
 
@@ -357,6 +407,27 @@ export class AtriumInteractionManager {
   private bindEvents(): void {
     const isInteractKey = (e: KeyboardEvent) =>
       e.code === "KeyE" || e.key.toLowerCase() === "e";
+
+    const onPromptClick = (e: MouseEvent) => {
+      if (!this.enabled || !this.promptVisible || !this.nearestTarget) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const now = performance.now();
+      if (now - this.lastTapAt < 260) return;
+      this.lastTapAt = now;
+      this.activateTarget(this.nearestTarget);
+      this.waitReleaseAfterActivate = false;
+    };
+
+    const onStatusPillClick = (e: MouseEvent) => {
+      if (!this.enabled || !this.activeTarget) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const now = performance.now();
+      if (now - this.lastTapAt < 260) return;
+      this.lastTapAt = now;
+      this.exitActiveInteraction();
+    };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (!this.enabled) return;
@@ -403,12 +474,16 @@ export class AtriumInteractionManager {
       this.waitReleaseAfterActivate = false;
     };
 
+    this.promptEl.addEventListener("click", onPromptClick);
+    this.statusPillEl.addEventListener("click", onStatusPillClick);
     window.addEventListener("keydown", onKeyDown, { passive: false });
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlurOrHide);
     document.addEventListener("visibilitychange", onBlurOrHide);
 
     this.cleanups.push(() => {
+      this.promptEl.removeEventListener("click", onPromptClick);
+      this.statusPillEl.removeEventListener("click", onStatusPillClick);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlurOrHide);

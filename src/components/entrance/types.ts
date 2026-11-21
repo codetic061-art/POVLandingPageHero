@@ -1,5 +1,6 @@
 export type {
   AtriumDiagnostics,
+  AtriumLoadingPhase,
   AtriumSceneApi,
   CreateAtriumSceneOptions,
 } from "../../atrium/createAtriumScene";

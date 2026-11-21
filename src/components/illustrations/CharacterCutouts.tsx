@@ -76,6 +76,7 @@ export function CharacterCutouts() {
               alt=""
               width={image.bounds[2]}
               height={image.bounds[3]}
+              decoding="async"
               style={sceneLayerStyle(image.bounds)}
               draggable={false}
             />

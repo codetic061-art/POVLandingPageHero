@@ -29,6 +29,12 @@ import {
   type MeetingDiagnostics,
   type MeetingLayoutMetrics,
 } from "./meeting/meetingRoom";
+import {
+  createVirtualJoystick,
+  detectTouchEnvironment,
+} from "./navigation/touchControls";
+
+export type AtriumLoadingPhase = "world" | "meeting" | null;
 
 export interface AtriumDiagnostics {
   renderer: "three-webgl";
@@ -74,6 +80,7 @@ export interface AtriumSceneApi {
     meeting: StickmanRigDiagnostics[];
   };
   setCharacterHeadVisible: (characterId: string, visible: boolean) => boolean;
+  setTouchUiForced: (forced: boolean) => void;
   getDiagnostics: () => AtriumDiagnostics;
   resize: () => void;
   dispose: () => void;
@@ -84,6 +91,7 @@ export interface CreateAtriumSceneOptions {
   initialMode?: AtriumViewMode;
   reducedMotion?: boolean;
   onModeChange?: (mode: AtriumViewMode) => void;
+  onLoadingChange?: (loading: boolean, phase: AtriumLoadingPhase) => void;
 }
 
 export function createAtriumScene({
@@ -91,6 +99,7 @@ export function createAtriumScene({
   initialMode = "orbit",
   reducedMotion = false,
   onModeChange,
+  onLoadingChange,
 }: CreateAtriumSceneOptions): AtriumSceneApi {
   const { visualStyle, lighting, navigation } = ATRIUM_CONFIG;
 
@@ -105,7 +114,8 @@ export function createAtriumScene({
     antialias: true,
     powerPreference: "high-performance",
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const isTouchInitial = detectTouchEnvironment();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isTouchInitial ? 1.5 : 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NeutralToneMapping;
   renderer.toneMappingExposure = 0.97;
@@ -351,6 +361,21 @@ export function createAtriumScene({
     () => enterMeetingRoom(false),
   );
 
+  const virtualJoystick = createVirtualJoystick(host, {
+    onMove: (fwd, strafe) => fpController.setVirtualMove(fwd, strafe),
+    onTouchDetected: () => {
+      interactionManager.setTouchMode(true);
+      meetingRoom.setTouchMode(true);
+    },
+  });
+
+  function syncJoystickVisibility(): void {
+    const show = viewMode === "firstPerson" && !fpController.isInInteractivePose();
+    virtualJoystick.setVisible(show);
+  }
+
+  let meetingLoadSeq = 0;
+
   function enterMeetingRoom(immediate = false): MeetingDiagnostics {
     if (disposed) return meetingRoom.getDiagnostics();
     const curFp = fpController.getState();
@@ -369,20 +394,47 @@ export function createAtriumScene({
 
     const fromPos = camera.position.clone();
     const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ");
+    const seq = ++meetingLoadSeq;
 
     interactionManager.setEnabled(false);
     fpController.disable();
     orbitControls.enabled = false;
     viewMode = "meeting";
-    meetingRoom.enter(fromPos, euler.y, euler.x, immediate || reducedMotion);
+    syncJoystickVisibility();
+
+    if (immediate) {
+      meetingRoom.enter(fromPos, euler.y, euler.x, true);
+      onModeChange?.("meeting");
+      canvas.focus({ preventScroll: true });
+      renderFrame();
+      return meetingRoom.getDiagnostics();
+    }
+
+    // Real loading lifecycle: display minimalist loader while meeting assets & initial GPU frame prepare
+    onLoadingChange?.(true, "meeting");
+    meetingRoom.enter(fromPos, euler.y, euler.x, true);
     onModeChange?.("meeting");
     canvas.focus({ preventScroll: true });
-    renderFrame();
+
+    void meetingRoom.prepareAssets().then(() => {
+      if (disposed || seq !== meetingLoadSeq || viewMode !== "meeting") return;
+      meetingRoom.update(animElapsedSec, 0.016);
+      renderFrame();
+      // Wait for GPU frame paint before smoothly dismissing the minimalist loader
+      requestAnimationFrame(() => {
+        if (disposed || seq !== meetingLoadSeq) return;
+        renderFrame();
+        onLoadingChange?.(false, null);
+      });
+    });
+
     return meetingRoom.getDiagnostics();
   }
 
   function exitMeetingRoom(immediate = false): void {
     if (disposed || !meetingRoom.isActive()) return;
+    meetingLoadSeq++;
+    onLoadingChange?.(false, null);
     const ret = savedMeetingReturn;
     const toPos = new THREE.Vector3(
       ret.x,
@@ -401,6 +453,7 @@ export function createAtriumScene({
         fpController.spawnAt(ret.x, ret.z, ret.yaw, ret.pitch, ret.feetY);
         interactionManager.setEnabled(true);
         interactionManager.update(0.016);
+        syncJoystickVisibility();
         onModeChange?.("firstPerson");
         canvas.focus({ preventScroll: true });
         renderFrame();
@@ -441,6 +494,8 @@ export function createAtriumScene({
       return;
     }
 
+    meetingLoadSeq++;
+    onLoadingChange?.(false, null);
     if (meetingRoom.isActive()) {
       meetingRoom.exit(camera.position.clone(), 0, -0.02, () => {}, true);
     }
@@ -458,6 +513,7 @@ export function createAtriumScene({
       interactionManager.update(0.016);
       canvas.focus({ preventScroll: true });
     }
+    syncJoystickVisibility();
     onModeChange?.(nextMode);
     renderFrame();
   }
@@ -584,6 +640,7 @@ export function createAtriumScene({
         if (interactionManager.update(dt)) {
           needsRender = true;
         }
+        syncJoystickVisibility();
       }
     }
 
@@ -616,6 +673,7 @@ export function createAtriumScene({
       interactionManager.resetAll(true);
       fpController.spawnAt(x, z, yaw, pitch, feetY);
       interactionManager.update(0.016);
+      syncJoystickVisibility();
       renderFrame();
       return fpController.getState();
     },
@@ -642,12 +700,14 @@ export function createAtriumScene({
     stepInteraction(dt, skipRender = false) {
       fpController.step(dt);
       interactionManager.update(dt);
+      syncJoystickVisibility();
       if (!skipRender) renderFrame();
       return interactionManager.getSnapshot();
     },
     exitInteraction() {
       interactionManager.exitActiveInteraction(false);
       fpController.step(0.016);
+      syncJoystickVisibility();
       renderFrame();
       return interactionManager.getSnapshot();
     },
@@ -689,6 +749,12 @@ export function createAtriumScene({
       found.setOriginalHeadVisible(visible);
       renderFrame();
       return true;
+    },
+    setTouchUiForced(forced) {
+      virtualJoystick.setTouchModeForced(forced);
+      interactionManager.setTouchMode(forced);
+      meetingRoom.setTouchMode(forced);
+      syncJoystickVisibility();
     },
     getDiagnostics() {
       const usedMats = new Set<string>();
@@ -739,6 +805,7 @@ export function createAtriumScene({
       disposed = true;
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
+      virtualJoystick.dispose();
       interactionManager.dispose();
       meetingRoom.dispose();
       stickmanMaster.dispose();
